@@ -12,9 +12,56 @@ body {
 }
 
 input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
-  accent-color: rgb(50, 100, 200);
+  height: 4px;
+  background: rgba(50, 100, 200, 0.25);
+  border-radius: 2px;
+  outline: none;
   cursor: pointer;
+  touch-action: manipulation;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgb(50, 100, 200);
+  cursor: pointer;
+  border: 2px solid rgba(200, 220, 255, 0.3);
+  transition: background 0.15s, transform 0.1s;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  background: rgb(80, 130, 230);
+  transform: scale(1.15);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgb(50, 100, 200);
+  cursor: pointer;
+  border: 2px solid rgba(200, 220, 255, 0.3);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: rgba(50, 100, 200, 0.25);
+  border-radius: 2px;
+}
+
+input[type="range"]:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+input[type="range"]:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
 }
 
 input[type="number"] {

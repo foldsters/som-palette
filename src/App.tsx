@@ -58,6 +58,38 @@ const DEFAULT_PARAMS: Params = {
   tileable: true,
 }
 
+// ─── Slider ──────────────────────────────────────────────────────────────────
+// Must live outside App so React doesn't remount it on every render.
+
+interface SliderProps {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  display?: string
+  disabled?: boolean
+  onChange: (val: number) => void
+}
+
+function Slider({ label, value, min, max, step, display, disabled, onChange }: SliderProps) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px' }}>
+        <span style={{ color: MUTED }}>{label}</span>
+        <span style={{ color: TEXT }}>{display ?? value.toFixed(2)}</span>
+      </div>
+      <input
+        type="range"
+        min={min} max={max} step={step}
+        value={value}
+        disabled={disabled}
+        onChange={e => onChange(parseFloat(e.target.value))}
+      />
+    </div>
+  )
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -75,7 +107,7 @@ export default function App() {
   const paletteRef       = useRef(new Float32Array(64 * 3))
   const iterRef          = useRef(0)
   const totalIterRef     = useRef(0)
-  const frameCountRef    = useRef(0)
+  const frameCountRef    = useRef(0) // unused after cube-update simplification
   const animRef          = useRef<number | null>(null)
   const paramsRef        = useRef(params)
 
@@ -154,16 +186,10 @@ export default function App() {
       )
 
       iterRef.current = to
-      frameCountRef.current++
 
       // Always update 2D canvas
       if (paletteCanvasRef.current) {
         renderPalette(paletteCanvasRef.current, paletteRef.current, p.rows, p.cols)
-      }
-
-      // Update 3D cube less frequently to keep it smooth
-      if (frameCountRef.current % 15 === 0) {
-        setPaletteCopy(new Float32Array(paletteRef.current))
       }
 
       const prog = to / totalIterRef.current
@@ -222,33 +248,13 @@ export default function App() {
 
   const totalIter = Math.max(1, Math.round(Math.pow(10, params.quality / 2)))
 
+  // Palette canvas: square cells, largest dimension = CANVAS_SIZE
+  const cellPx = Math.max(1, Math.floor(CANVAS_SIZE / Math.max(params.rows, params.cols)))
+  const paletteCanvasW = cellPx * params.cols
+  const paletteCanvasH = cellPx * params.rows
+
   function setParam<K extends keyof Params>(key: K, val: Params[K]) {
     setParams(p => ({ ...p, [key]: val }))
-  }
-
-  function Slider({
-    label, paramKey, min, max, step, display,
-  }: {
-    label: string
-    paramKey: keyof Params
-    min: number; max: number; step: number
-    display?: string
-  }) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px' }}>
-          <span style={{ color: MUTED }}>{label}</span>
-          <span style={{ color: TEXT }}>{display ?? (params[paramKey] as number).toFixed(2)}</span>
-        </div>
-        <input
-          type="range"
-          min={min} max={max} step={step}
-          value={params[paramKey] as number}
-          onChange={e => setParam(paramKey, parseFloat(e.target.value) as Params[typeof paramKey])}
-          disabled={running}
-        />
-      </div>
-    )
   }
 
   // ─── Render ────────────────────────────────────────────────────────────────
@@ -274,7 +280,22 @@ export default function App() {
 
         {/* Source image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
+            <label style={{ ...btn(), cursor: 'pointer' }}>
+              Upload
+              <input
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={e => {
+                  const file = e.target.files?.[0]
+                  if (file) loadFromSrc(URL.createObjectURL(file))
+                  e.target.value = ''
+                }}
+              />
+            </label>
+          </div>
           <div
             style={{
               position: 'relative', borderRadius: '10px', overflow: 'hidden',
@@ -306,14 +327,14 @@ export default function App() {
           <div style={{
             position: 'relative', borderRadius: '10px', overflow: 'hidden',
             border: `1px solid ${BORDER}`,
-            width: CANVAS_SIZE, height: CANVAS_SIZE,
             background: '#050d1a',
+            display: 'inline-block',
           }}>
             <canvas
               ref={paletteCanvasRef}
-              width={CANVAS_SIZE}
-              height={CANVAS_SIZE}
-              style={{ display: 'block' }}
+              width={paletteCanvasW}
+              height={paletteCanvasH}
+              style={{ display: 'block', maxWidth: CANVAS_SIZE, maxHeight: CANVAS_SIZE }}
             />
             {running && (
               <div style={{
@@ -361,7 +382,7 @@ export default function App() {
             </Canvas>
           </div>
           <span style={{ fontSize: '10px', color: MUTED, opacity: 0.5, textAlign: 'center' }}>
-            drag to orbit · scroll to zoom
+            drag to orbit · scroll to zoom · ctrl+drag to pan
           </span>
         </div>
       </div>
@@ -370,32 +391,41 @@ export default function App() {
       <div style={{ background: PANEL, borderRadius: '10px', padding: '20px', border: `1px solid ${BORDER}` }}>
 
         {/* Grid size */}
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '11px', color: MUTED }}>GRID</span>
-          {([4, 6, 8, 12, 16] as const).map(n => (
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '11px', color: MUTED, marginRight: '4px' }}>GRID</span>
+          {((): [number, number][] => {
+            const out: [number, number][] = []
+            let r = 2, c = 2
+            while (r <= 1024 && c <= 1024) {
+              out.push([r, c])
+              if (c === r) c *= 2
+              else { r = c; }
+            }
+            return out
+          })().map(([r, c]) => (
             <button
-              key={n}
-              onClick={() => setParams(p => ({ ...p, rows: n, cols: n }))}
+              key={`${r}x${c}`}
+              onClick={() => setParams(p => ({ ...p, rows: r, cols: c }))}
               disabled={running}
-              style={btn(params.rows === n && params.cols === n)}
+              style={{ ...btn(params.rows === r && params.cols === c), fontSize: '11px', padding: '4px 10px' }}
             >
-              {n}×{n}
+              {r}×{c}
             </button>
           ))}
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginLeft: 'auto' }}>
             <span style={{ fontSize: '11px', color: MUTED }}>rows</span>
             <input
-              type="number" min={1} max={32}
+              type="number" min={1}
               value={params.rows}
               disabled={running}
-              onChange={e => setParam('rows', Math.max(1, Math.min(32, parseInt(e.target.value) || 1)))}
+              onChange={e => setParam('rows', Math.max(1, parseInt(e.target.value) || 1))}
             />
             <span style={{ fontSize: '11px', color: MUTED }}>cols</span>
             <input
-              type="number" min={1} max={32}
+              type="number" min={1}
               value={params.cols}
               disabled={running}
-              onChange={e => setParam('cols', Math.max(1, Math.min(32, parseInt(e.target.value) || 1)))}
+              onChange={e => setParam('cols', Math.max(1, parseInt(e.target.value) || 1))}
             />
           </div>
         </div>
@@ -407,11 +437,11 @@ export default function App() {
           gap: '14px 28px',
           marginBottom: '20px',
         }}>
-          <Slider label="Iterations"    paramKey="quality"      min={0} max={10} step={0.1} display={totalIter.toLocaleString()} />
-          <Slider label="Blend Start"   paramKey="blendStart"   min={0} max={1}  step={0.005} />
-          <Slider label="Blend End"     paramKey="blendEnd"     min={0} max={1}  step={0.005} />
-          <Slider label="Radius Start"  paramKey="radiusStart"  min={0} max={1}  step={0.005} />
-          <Slider label="Radius End"    paramKey="radiusEnd"    min={0} max={1}  step={0.005} />
+          <Slider label="Iterations"   value={params.quality}      min={0} max={10} step={0.1}   disabled={running} display={totalIter.toLocaleString()} onChange={v => setParam('quality', v)} />
+          <Slider label="Blend Start"  value={params.blendStart}   min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('blendStart', v)} />
+          <Slider label="Blend End"    value={params.blendEnd}     min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('blendEnd', v)} />
+          <Slider label="Radius Start" value={params.radiusStart}  min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('radiusStart', v)} />
+          <Slider label="Radius End"   value={params.radiusEnd}    min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('radiusEnd', v)} />
         </div>
 
         {/* Buttons */}

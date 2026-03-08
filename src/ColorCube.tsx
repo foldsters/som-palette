@@ -1,6 +1,7 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useEffect } from 'react'
 import { useFrame } from '@react-three/fiber'
 import { OrbitControls, Line } from '@react-three/drei'
+import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import * as THREE from 'three'
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -99,7 +100,23 @@ export interface ColorCubeProps {
 
 export default function ColorCube({ imageData, palette, rows, cols }: ColorCubeProps) {
   const groupRef = useRef<THREE.Group>(null)
+  const controlsRef = useRef<OrbitControlsImpl>(null)
   const interacted = useRef(false)
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Control' && controlsRef.current) controlsRef.current.enablePan = true
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control' && controlsRef.current) controlsRef.current.enablePan = false
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [])
 
   useFrame((_, delta) => {
     if (!interacted.current && groupRef.current) {
@@ -110,6 +127,7 @@ export default function ColorCube({ imageData, palette, rows, cols }: ColorCubeP
   return (
     <>
       <OrbitControls
+        ref={controlsRef}
         enablePan={false}
         enableZoom
         enableRotate
