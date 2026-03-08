@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Canvas } from '@react-three/fiber'
-import ColorCube from './ColorCube'
-import { runSOMBatch, renderPalette, smoothPaletteCanvas, toHex } from './som'
+import ColorCube, { TopologyScene } from './ColorCube'
+import { runSOMBatch, renderPalette, smoothPaletteCanvas } from './som'
+import { GLSOM } from './glSOM'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -40,22 +41,22 @@ interface Params {
   rows: number
   cols: number
   quality: number
-  blendStart: number
-  blendEnd: number
-  radiusStart: number
-  radiusEnd: number
-  tileable: boolean
+  blendDecay: number  // 0.5 = linear, <0.5 = fast early drop, >0.5 = slow early drop
+  radiusDecay: number
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical'
+  gaussian: boolean
+  randomInit: boolean
 }
 
 const DEFAULT_PARAMS: Params = {
   rows: 8,
   cols: 8,
   quality: 3,
-  blendStart: 0.3,
-  blendEnd: 0.3,
-  radiusStart: 0.3,
-  radiusEnd: 0.3,
-  tileable: true,
+  blendDecay: 0.5,
+  radiusDecay: 0.5,
+  topology: 'toroidal',
+  gaussian: true,
+  randomInit: false,
 }
 
 // ─── Slider ──────────────────────────────────────────────────────────────────
@@ -98,20 +99,46 @@ export default function App() {
   const [progress, setProgress]     = useState(0)
   const [imageData, setImageData]   = useState<ImageData | null>(null)
   const [paletteCopy, setPaletteCopy] = useState<Float32Array | null>(null)
-  const [hexColors, setHexColors]   = useState<string[]>([])
-  const [copied, setCopied]         = useState<string | null>(null)
   const [dragging, setDragging]     = useState(false)
+  const [copiedHex, setCopiedHex]   = useState<string | null>(null)
 
   const paletteCanvasRef = useRef<HTMLCanvasElement>(null)
   const imageCanvasRef   = useRef<HTMLCanvasElement>(null)
   const paletteRef       = useRef(new Float32Array(64 * 3))
   const iterRef          = useRef(0)
   const totalIterRef     = useRef(0)
-  const frameCountRef    = useRef(0) // unused after cube-update simplification
   const animRef          = useRef<number | null>(null)
   const paramsRef        = useRef(params)
+  const glomRef          = useRef<GLSOM | null>(null)
+  const usingGLRef       = useRef(false)
+
+  // Init WebGL2 SOM once
+  useEffect(() => {
+    if (!GLSOM.isSupported()) return
+    try {
+      glomRef.current = new GLSOM()
+      usingGLRef.current = true
+      console.log('WebGL2 SOM enabled')
+    } catch (e) {
+      console.warn('WebGL2 SOM init failed, falling back to CPU:', e)
+    }
+    return () => { glomRef.current?.dispose(); glomRef.current = null }
+  }, [])
 
   useEffect(() => { paramsRef.current = params }, [params])
+
+  // Reset palette when grid size, topology, or neighbourhood function changes
+  useEffect(() => {
+    if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; setRunning(false) }
+    const { rows, cols } = params
+    const glsom = glomRef.current
+    if (glsom) { glsom.init(rows, cols); paletteRef.current = glsom.cpuMirror }
+    else { paletteRef.current = new Float32Array(rows * cols * 3) }
+    const canvas = paletteCanvasRef.current
+    if (canvas) { const ctx = canvas.getContext('2d'); ctx?.clearRect(0, 0, canvas.width, canvas.height) }
+    setProgress(0)
+    setPaletteCopy(null)
+  }, [params.rows, params.cols, params.topology, params.gaussian])
 
   // ─── Image loading ─────────────────────────────────────────────────────────
 
@@ -144,12 +171,7 @@ export default function App() {
     if (animRef.current) cancelAnimationFrame(animRef.current)
     animRef.current = null
     setRunning(false)
-    const p = paramsRef.current
-    const snap = new Float32Array(paletteRef.current)
-    setPaletteCopy(snap)
-    setHexColors(
-      Array.from({ length: p.rows * p.cols }, (_, i) => toHex(snap, i))
-    )
+    setPaletteCopy(new Float32Array(paletteRef.current))
   }, [])
 
   const startTraining = useCallback(() => {
@@ -161,11 +183,31 @@ export default function App() {
     const total = Math.max(1, Math.round(Math.pow(10, p.quality / 2)))
     totalIterRef.current = total
     iterRef.current = 0
-    frameCountRef.current = 0
-    paletteRef.current = new Float32Array(p.rows * p.cols * 3)
+
+    // Init GL or CPU palette buffer
+    const glsom = glomRef.current
+    if (glsom) {
+      glsom.init(p.rows, p.cols)
+      paletteRef.current = glsom.cpuMirror
+    } else {
+      paletteRef.current = new Float32Array(p.rows * p.cols * 3)
+    }
+
+    // Random initialization: sample palette cells from image pixels
+    if (p.randomInit) {
+      const totalPixels = data.width * data.height
+      const palette = paletteRef.current
+      for (let i = 0; i < p.rows * p.cols; i++) {
+        const pi = Math.floor(Math.random() * totalPixels) * 4
+        palette[i * 3]     = data.data[pi]     / 255
+        palette[i * 3 + 1] = data.data[pi + 1] / 255
+        palette[i * 3 + 2] = data.data[pi + 2] / 255
+      }
+      if (glsom) glsom.uploadMirror()
+    }
+
     setRunning(true)
     setProgress(0)
-    setHexColors([])
     setPaletteCopy(null)
 
     // Run ~300 visual updates over the full training
@@ -176,14 +218,21 @@ export default function App() {
       const from = iterRef.current
       const to   = Math.min(from + batchSize, totalIterRef.current)
 
-      runSOMBatch(
-        paletteRef.current, data as ImageData,
-        p.rows, p.cols,
-        from, to, totalIterRef.current,
-        p.blendStart, p.blendEnd,
-        p.radiusStart, p.radiusEnd,
-        p.tileable,
-      )
+      if (glsom) {
+        glsom.runBatch(
+          data as ImageData,
+          from, to, totalIterRef.current,
+          p.blendDecay, p.radiusDecay, p.topology, p.gaussian,
+        )
+        // paletteRef.current already points to glsom.cpuMirror, synced by runBatch
+      } else {
+        runSOMBatch(
+          paletteRef.current, data as ImageData,
+          p.rows, p.cols,
+          from, to, totalIterRef.current,
+          p.blendDecay, p.radiusDecay, p.topology, p.gaussian,
+        )
+      }
 
       iterRef.current = to
 
@@ -200,11 +249,7 @@ export default function App() {
       } else {
         animRef.current = null
         setRunning(false)
-        const snap = new Float32Array(paletteRef.current)
-        setPaletteCopy(snap)
-        setHexColors(
-          Array.from({ length: p.rows * p.cols }, (_, i) => toHex(snap, i))
-        )
+        setPaletteCopy(new Float32Array(paletteRef.current))
       }
     }
 
@@ -217,10 +262,10 @@ export default function App() {
     const canvas = paletteCanvasRef.current
     if (!canvas) return
     const p = paramsRef.current
-    smoothPaletteCanvas(canvas, paletteRef.current, p.rows, p.cols, p.tileable)
+    smoothPaletteCanvas(canvas, paletteRef.current, p.rows, p.cols, p.topology === 'toroidal')
   }, [])
 
-  const handleExport = useCallback(() => {
+  const handleExportPNG = useCallback(() => {
     const canvas = paletteCanvasRef.current
     if (!canvas) return
     const link = document.createElement('a')
@@ -229,10 +274,40 @@ export default function App() {
     link.click()
   }, [])
 
-  const copyHex = useCallback((hex: string) => {
-    navigator.clipboard.writeText(hex).catch(() => {})
-    setCopied(hex)
-    setTimeout(() => setCopied(null), 1500)
+  const handleExportGPL = useCallback(() => {
+    const p = paramsRef.current
+    const palette = paletteRef.current
+    const { rows, cols } = p
+    const lines = ['GIMP Palette', 'Name: SOM Palette', `Columns: ${cols}`, '#']
+    for (let i = 0; i < rows * cols; i++) {
+      const r = palette[i * 3], g = palette[i * 3 + 1], b = palette[i * 3 + 2]
+      const ri = Math.round(Math.max(0, Math.min(1, r)) * 255)
+      const gi = Math.round(Math.max(0, Math.min(1, g)) * 255)
+      const bi = Math.round(Math.max(0, Math.min(1, b)) * 255)
+      lines.push(`${ri.toString().padStart(3)} ${gi.toString().padStart(3)} ${bi.toString().padStart(3)}\tUntitled`)
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
+    const link = document.createElement('a')
+    link.download = 'palette.gpl'
+    link.href = URL.createObjectURL(blob)
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }, [])
+
+  const handlePaletteClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = paletteCanvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const x = Math.floor((e.clientX - rect.left) / rect.width  * canvas.width)
+    const y = Math.floor((e.clientY - rect.top)  / rect.height * canvas.height)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const px = ctx.getImageData(x, y, 1, 1).data
+    const hex = `#${px[0].toString(16).padStart(2,'0')}${px[1].toString(16).padStart(2,'0')}${px[2].toString(16).padStart(2,'0')}`
+    navigator.clipboard.writeText(hex).then(() => {
+      setCopiedHex(hex)
+      setTimeout(() => setCopiedHex(null), 1500)
+    })
   }, [])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -248,11 +323,6 @@ export default function App() {
 
   const totalIter = Math.max(1, Math.round(Math.pow(10, params.quality / 2)))
 
-  // Palette canvas: square cells, largest dimension = CANVAS_SIZE
-  const cellPx = Math.max(1, Math.floor(CANVAS_SIZE / Math.max(params.rows, params.cols)))
-  const paletteCanvasW = cellPx * params.cols
-  const paletteCanvasH = cellPx * params.rows
-
   function setParam<K extends keyof Params>(key: K, val: Params[K]) {
     setParams(p => ({ ...p, [key]: val }))
   }
@@ -262,7 +332,7 @@ export default function App() {
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', gap: '16px',
-      padding: '24px', minHeight: '100vh',
+      padding: '24px', height: '100vh',
     }}>
 
       {/* Header */}
@@ -275,8 +345,8 @@ export default function App() {
         </p>
       </div>
 
-      {/* Three panels */}
-      <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+      {/* Image + Palette row */}
+      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
 
         {/* Source image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -322,20 +392,42 @@ export default function App() {
         </div>
 
         {/* Palette canvas */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
           <div style={{
             position: 'relative', borderRadius: '10px', overflow: 'hidden',
             border: `1px solid ${BORDER}`,
             background: '#050d1a',
-            display: 'inline-block',
           }}>
             <canvas
               ref={paletteCanvasRef}
-              width={paletteCanvasW}
-              height={paletteCanvasH}
-              style={{ display: 'block', maxWidth: CANVAS_SIZE, maxHeight: CANVAS_SIZE }}
+              width={params.cols}
+              height={params.rows}
+              style={{
+                display: 'block',
+                height: CANVAS_SIZE,
+                width: `min(${CANVAS_SIZE * params.cols / params.rows}px, 100%)`,
+                cursor: 'crosshair',
+                imageRendering: 'pixelated',
+              }}
+              onClick={handlePaletteClick}
             />
+            {/* Copy toast */}
+            {copiedHex && (
+              <div style={{
+                position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
+                background: 'rgba(0,8,20,0.92)', border: `1px solid ${ACCENT}`,
+                borderRadius: '6px', padding: '5px 12px',
+                display: 'flex', alignItems: 'center', gap: '8px',
+                fontSize: '12px', color: TEXT, pointerEvents: 'none',
+              }}>
+                <span style={{
+                  display: 'inline-block', width: '12px', height: '12px',
+                  borderRadius: '2px', background: copiedHex, border: '1px solid rgba(255,255,255,0.2)',
+                }} />
+                {copiedHex} copied
+              </div>
+            )}
             {running && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -360,13 +452,16 @@ export default function App() {
           </div>
         </div>
 
-        {/* 3D color cube */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: '1 1 340px', minWidth: 300 }}>
-          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>COLOR SPACE · RGB</span>
+      </div>
+
+      {/* 3D views + floating controls */}
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <div style={{ display: 'flex', gap: '8px', width: '100%', height: '100%' }}>
+
+          {/* RGB cube — always shown */}
           <div style={{
-            borderRadius: '10px', overflow: 'hidden',
-            border: `1px solid ${BORDER}`,
-            height: CANVAS_SIZE, background: '#030810',
+            flex: 1, borderRadius: '10px', overflow: 'hidden',
+            border: `1px solid ${BORDER}`, background: '#030810',
           }}>
             <Canvas
               camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
@@ -381,148 +476,163 @@ export default function App() {
               />
             </Canvas>
           </div>
-          <span style={{ fontSize: '10px', color: MUTED, opacity: 0.5, textAlign: 'center' }}>
-            drag to orbit · scroll to zoom · ctrl+drag to pan
-          </span>
-        </div>
-      </div>
 
-      {/* Controls */}
-      <div style={{ background: PANEL, borderRadius: '10px', padding: '20px', border: `1px solid ${BORDER}` }}>
+          {/* Topology 3D view — shown for non-rectangular topologies */}
+          {params.topology !== 'rectangular' && (
+            <div style={{
+              flex: 1, borderRadius: '10px', overflow: 'hidden',
+              border: `1px solid ${BORDER}`, background: '#030810',
+            }}>
+              <Canvas
+                camera={{ position: [0, 0, 1.5], fov: 45 }}
+                style={{ width: '100%', height: '100%' }}
+                gl={{ antialias: true }}
+              >
+                <TopologyScene
+                  topology={params.topology}
+                  paletteCanvasRef={paletteCanvasRef}
+                />
+              </Canvas>
+            </div>
+          )}
 
-        {/* Grid size */}
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '11px', color: MUTED, marginRight: '4px' }}>GRID</span>
-          {((): [number, number][] => {
-            const out: [number, number][] = []
-            let r = 2, c = 2
-            while (r <= 1024 && c <= 1024) {
-              out.push([r, c])
-              if (c === r) c *= 2
-              else { r = c; }
-            }
-            return out
-          })().map(([r, c]) => (
-            <button
-              key={`${r}x${c}`}
-              onClick={() => setParams(p => ({ ...p, rows: r, cols: c }))}
-              disabled={running}
-              style={{ ...btn(params.rows === r && params.cols === c), fontSize: '11px', padding: '4px 10px' }}
-            >
-              {r}×{c}
-            </button>
-          ))}
-          <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginLeft: 'auto' }}>
-            <span style={{ fontSize: '11px', color: MUTED }}>rows</span>
-            <input
-              type="number" min={1}
-              value={params.rows}
-              disabled={running}
-              onChange={e => setParam('rows', Math.max(1, parseInt(e.target.value) || 1))}
-            />
-            <span style={{ fontSize: '11px', color: MUTED }}>cols</span>
-            <input
-              type="number" min={1}
-              value={params.cols}
-              disabled={running}
-              onChange={e => setParam('cols', Math.max(1, parseInt(e.target.value) || 1))}
-            />
-          </div>
         </div>
 
-        {/* Sliders */}
+        {/* Floating controls */}
         <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-          gap: '14px 28px',
-          marginBottom: '20px',
+          position: 'absolute', top: 12, left: 12,
+          background: PANEL, borderRadius: '10px', padding: '16px',
+          border: `1px solid ${BORDER}`, backdropFilter: 'blur(8px)',
         }}>
-          <Slider label="Iterations"   value={params.quality}      min={0} max={10} step={0.1}   disabled={running} display={totalIter.toLocaleString()} onChange={v => setParam('quality', v)} />
-          <Slider label="Blend Start"  value={params.blendStart}   min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('blendStart', v)} />
-          <Slider label="Blend End"    value={params.blendEnd}     min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('blendEnd', v)} />
-          <Slider label="Radius Start" value={params.radiusStart}  min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('radiusStart', v)} />
-          <Slider label="Radius End"   value={params.radiusEnd}    min={0} max={1}  step={0.005} disabled={running} onChange={v => setParam('radiusEnd', v)} />
-        </div>
 
-        {/* Buttons */}
-        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
-
-          {/* Mode toggle */}
-          <div style={{
-            display: 'flex', border: `1px solid ${BORDER}`,
-            borderRadius: '6px', overflow: 'hidden',
-          }}>
-            {(['Traditional', 'Tileable'] as const).map(mode => {
-              const active = (mode === 'Tileable') === params.tileable
-              return (
+          {/* Grid size */}
+          {(['rows', 'cols'] as const).map(axis => (
+            <div key={axis} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '11px', color: MUTED, width: '32px' }}>{axis.toUpperCase()}</span>
+              {[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].map(n => (
                 <button
-                  key={mode}
-                  onClick={() => setParam('tileable', mode === 'Tileable')}
+                  key={n}
+                  onClick={() => setParam(axis, n)}
                   disabled={running}
-                  style={{
-                    padding: '6px 16px', border: 'none',
-                    cursor: running ? 'not-allowed' : 'pointer',
-                    background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                    color: active ? ACCENT : MUTED,
-                    fontFamily: 'inherit', fontSize: '12px',
-                    transition: 'all 0.15s',
-                  }}
+                  style={{ ...btn(params[axis] === n), fontSize: '11px', padding: '4px 10px' }}
                 >
-                  {mode}
+                  {n}
                 </button>
-              )
-            })}
+              ))}
+            </div>
+          ))}
+
+          {/* Sliders */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+            gap: '14px 28px',
+            marginBottom: '16px',
+          }}>
+            <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} onChange={v => setParam('quality', v)} />
+            <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} onChange={v => setParam('blendDecay', v)} />
+            <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} onChange={v => setParam('radiusDecay', v)} />
           </div>
 
-          <button
-            onClick={running ? stopTraining : startTraining}
-            disabled={!imageData}
-            style={btn(!running, running)}
-          >
-            {running ? '■ Stop' : '▶ Draw'}
-          </button>
+          {/* Controls + actions */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
 
-          <button onClick={handleSmooth} disabled={running} style={btn()}>
-            Smooth
-          </button>
+            {/* Topology toggle */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>TOPOLOGY</span>
+            <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+              {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
+                const active = params.topology === mode.toLowerCase()
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => setParam('topology', mode.toLowerCase() as Params['topology'])}
+                    disabled={running}
+                    style={{
+                      padding: '6px 16px', border: 'none',
+                      cursor: running ? 'not-allowed' : 'pointer',
+                      background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                      color: active ? ACCENT : MUTED,
+                      fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                    }}
+                  >
+                    {mode}
+                  </button>
+                )
+              })}
+            </div>
+            </div>
 
-          <button onClick={handleExport} disabled={running} style={btn()}>
-            Export PNG
-          </button>
+            {/* Neighbourhood toggle */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>MASK</span>
+            <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+              {(['Hard', 'Gaussian'] as const).map(mode => {
+                const active = (mode === 'Gaussian') === params.gaussian
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => setParam('gaussian', mode === 'Gaussian')}
+                    disabled={running}
+                    style={{
+                      padding: '6px 16px', border: 'none',
+                      cursor: running ? 'not-allowed' : 'pointer',
+                      background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                      color: active ? ACCENT : MUTED,
+                      fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                    }}
+                  >
+                    {mode}
+                  </button>
+                )
+              })}
+            </div>
+            </div>
+
+            {/* Init toggle */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>INIT</span>
+              <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+                {(['Zero', 'Random'] as const).map(mode => {
+                  const active = (mode === 'Random') === params.randomInit
+                  return (
+                    <button
+                      key={mode}
+                      onClick={() => setParam('randomInit', mode === 'Random')}
+                      disabled={running}
+                      style={{
+                        padding: '6px 16px', border: 'none',
+                        cursor: running ? 'not-allowed' : 'pointer',
+                        background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                        color: active ? ACCENT : MUTED,
+                        fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                      }}
+                    >
+                      {mode}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+          </div>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(!running, running)}>
+              {running ? '■ Stop' : '▶ Draw'}
+            </button>
+            <button onClick={handleSmooth} disabled={running} style={btn()}>Smooth</button>
+            <button onClick={handleExportPNG} disabled={running} style={btn()}>Export PNG</button>
+            <button onClick={handleExportGPL} disabled={running} style={btn()}>Export GPL</button>
+          </div>
+          </div>
         </div>
+
+        <span style={{ position: 'absolute', bottom: 10, left: 0, right: 0, fontSize: '10px', color: MUTED, opacity: 0.4, textAlign: 'center', pointerEvents: 'none' }}>
+          drag to orbit · scroll to zoom · ctrl+drag to pan
+        </span>
       </div>
 
-      {/* Swatches */}
-      {hexColors.length > 0 && (
-        <div style={{ background: PANEL, borderRadius: '10px', padding: '16px', border: `1px solid ${BORDER}` }}>
-          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>
-            SWATCHES · click to copy
-          </span>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginTop: '12px', alignItems: 'center' }}>
-            {hexColors.map((hex, i) => (
-              <button
-                key={i}
-                title={hex}
-                onClick={() => copyHex(hex)}
-                style={{
-                  width: 36, height: 36,
-                  background: hex,
-                  border: `2px solid ${copied === hex ? 'white' : 'transparent'}`,
-                  borderRadius: '5px', cursor: 'pointer',
-                  transition: 'transform 0.1s, border-color 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.18)')}
-                onMouseLeave={e => (e.currentTarget.style.transform = 'scale(1)')}
-              />
-            ))}
-            {copied && (
-              <span style={{ fontSize: '11px', color: 'rgb(100,200,120)', marginLeft: '8px' }}>
-                {copied} copied!
-              </span>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
