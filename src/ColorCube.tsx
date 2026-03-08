@@ -1,12 +1,11 @@
-import { useMemo, useRef, useEffect } from 'react'
+import { useMemo, useRef, useEffect, useState } from 'react'
 import { useFrame } from '@react-three/fiber'
 import { OrbitControls, Line } from '@react-three/drei'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import * as THREE from 'three'
 
-// ─── Sub-components ──────────────────────────────────────────────────────────
+// ─── RGB cube sub-components ─────────────────────────────────────────────────
 
-/** Point cloud sampled from the source image, colored by RGB. */
 function ImageCloud({ imageData }: { imageData: ImageData }) {
   const { positions, colors } = useMemo(() => {
     const maxPoints = 8000
@@ -21,10 +20,7 @@ function ImageCloud({ imageData }: { imageData: ImageData }) {
       pos.push(r, g, b)
       col.push(r, g, b)
     }
-    return {
-      positions: new Float32Array(pos),
-      colors: new Float32Array(col),
-    }
+    return { positions: new Float32Array(pos), colors: new Float32Array(col) }
   }, [imageData])
 
   return (
@@ -38,19 +34,15 @@ function ImageCloud({ imageData }: { imageData: ImageData }) {
   )
 }
 
-/** Palette colors as bright dots, larger than the image cloud. */
 function PaletteCloud({ palette, rows, cols }: { palette: Float32Array; rows: number; cols: number }) {
   const { positions, colors } = useMemo(() => {
     const count = rows * cols
     const pos = new Float32Array(count * 3)
     const col = new Float32Array(count * 3)
     for (let i = 0; i < count; i++) {
-      pos[i * 3]     = palette[i * 3]
-      pos[i * 3 + 1] = palette[i * 3 + 1]
-      pos[i * 3 + 2] = palette[i * 3 + 2]
-      col[i * 3]     = palette[i * 3]
-      col[i * 3 + 1] = palette[i * 3 + 1]
-      col[i * 3 + 2] = palette[i * 3 + 2]
+      pos[i * 3]     = palette[i * 3];     col[i * 3]     = palette[i * 3]
+      pos[i * 3 + 1] = palette[i * 3 + 1]; col[i * 3 + 1] = palette[i * 3 + 1]
+      pos[i * 3 + 2] = palette[i * 3 + 2]; col[i * 3 + 2] = palette[i * 3 + 2]
     }
     return { positions: pos, colors: col }
   }, [palette, rows, cols])
@@ -66,22 +58,15 @@ function PaletteCloud({ palette, rows, cols }: { palette: Float32Array; rows: nu
   )
 }
 
-/** Wireframe RGB unit cube + colored axis rays. */
 function CubeFrame() {
   const edges: [[number, number, number], [number, number, number]][] = [
-    // bottom
     [[0,0,0],[1,0,0]], [[1,0,0],[1,1,0]], [[1,1,0],[0,1,0]], [[0,1,0],[0,0,0]],
-    // top
     [[0,0,1],[1,0,1]], [[1,0,1],[1,1,1]], [[1,1,1],[0,1,1]], [[0,1,1],[0,0,1]],
-    // verticals
     [[0,0,0],[0,0,1]], [[1,0,0],[1,0,1]], [[1,1,0],[1,1,1]], [[0,1,0],[0,1,1]],
   ]
-
   return (
     <>
-      {edges.map(([a, b], i) => (
-        <Line key={i} points={[a, b]} color="#152844" lineWidth={1} />
-      ))}
+      {edges.map(([a, b], i) => <Line key={i} points={[a, b]} color="#152844" lineWidth={1} />)}
       <Line points={[[0,0,0],[1.12,0,0]]} color="#ff4040" lineWidth={2} />
       <Line points={[[0,0,0],[0,1.12,0]]} color="#40ff40" lineWidth={2} />
       <Line points={[[0,0,0],[0,0,1.12]]} color="#4080ff" lineWidth={2} />
@@ -89,7 +74,7 @@ function CubeFrame() {
   )
 }
 
-// ─── Scene ───────────────────────────────────────────────────────────────────
+// ─── RGB cube scene ───────────────────────────────────────────────────────────
 
 export interface ColorCubeProps {
   imageData: ImageData | null
@@ -112,34 +97,94 @@ export default function ColorCube({ imageData, palette, rows, cols }: ColorCubeP
     }
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      window.removeEventListener('keyup', onKeyUp)
-    }
+    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
   }, [])
 
   useFrame((_, delta) => {
-    if (!interacted.current && groupRef.current) {
-      groupRef.current.rotation.y += delta * 0.25
-    }
+    if (!interacted.current && groupRef.current) groupRef.current.rotation.y += delta * 0.25
   })
 
   return (
     <>
-      <OrbitControls
-        ref={controlsRef}
-        enablePan={false}
-        enableZoom
-        enableRotate
-        makeDefault
-        onStart={() => { interacted.current = true }}
-      />
-      {/* Offset so the RGB cube is centered at world origin */}
+      <OrbitControls ref={controlsRef} enablePan={false} enableZoom enableRotate makeDefault
+        onStart={() => { interacted.current = true }} />
       <group ref={groupRef} position={[-0.5, -0.5, -0.5]}>
         <CubeFrame />
         {imageData && <ImageCloud imageData={imageData} />}
         {palette && <PaletteCloud palette={palette} rows={rows} cols={cols} />}
       </group>
+    </>
+  )
+}
+
+// ─── Topology scene (sphere / torus) ─────────────────────────────────────────
+
+export interface TopologySceneProps {
+  topology: 'sphere' | 'tileable'
+  paletteCanvasRef: React.RefObject<HTMLCanvasElement>
+}
+
+export function TopologyScene({ topology, paletteCanvasRef }: TopologySceneProps) {
+  const [texture, setTexture] = useState<THREE.CanvasTexture | null>(null)
+  const meshRef = useRef<THREE.Mesh>(null)
+  const controlsRef = useRef<OrbitControlsImpl>(null)
+  const interacted = useRef(false)
+
+  const textureRef = useRef<THREE.CanvasTexture | null>(null)
+  const lastSize = useRef({ w: 0, h: 0 })
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Control' && controlsRef.current) controlsRef.current.enablePan = true
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control' && controlsRef.current) controlsRef.current.enablePan = false
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
+  }, [])
+
+  useFrame((_, delta) => {
+    const canvas = paletteCanvasRef.current
+    if (canvas) {
+      // Recreate texture if canvas dimensions changed (e.g. rows/cols updated)
+      if (!textureRef.current || canvas.width !== lastSize.current.w || canvas.height !== lastSize.current.h) {
+        textureRef.current?.dispose()
+        const tex = new THREE.CanvasTexture(canvas)
+        // Longitude wraps; latitude does not (sphere) but torus wraps both
+        tex.wrapS = THREE.RepeatWrapping
+        tex.wrapT = topology === 'tileable' ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
+        textureRef.current = tex
+        lastSize.current = { w: canvas.width, h: canvas.height }
+        setTexture(tex)
+      }
+      textureRef.current!.needsUpdate = true
+    }
+    if (!interacted.current && meshRef.current) meshRef.current.rotation.y += delta * 0.25
+  })
+
+  useEffect(() => {
+    return () => { textureRef.current?.dispose() }
+  }, [])
+
+  return (
+    <>
+      <OrbitControls ref={controlsRef} enablePan={false} enableZoom enableRotate makeDefault
+        onStart={() => { interacted.current = true }} />
+      {texture && (
+        topology === 'sphere' ? (
+          <mesh ref={meshRef}>
+            <sphereGeometry args={[0.5, 64, 32]} />
+            <meshBasicMaterial map={texture} />
+          </mesh>
+        ) : (
+          <mesh ref={meshRef}>
+            <torusGeometry args={[0.35, 0.2, 64, 128]} />
+            <meshBasicMaterial map={texture} />
+          </mesh>
+        )
+      )}
     </>
   )
 }
