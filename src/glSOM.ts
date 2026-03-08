@@ -21,7 +21,7 @@ uniform vec2 u_bmu;       // BMU grid position in GPU coords (y=0 at bottom)
 uniform vec3 u_color;     // sampled pixel RGB [0,1]
 uniform float u_blend;
 uniform float u_radius;   // neighbourhood radius in grid cells
-uniform int u_topology;  // 0=rectangular 1=cylindrical 2=toroidal 3=spherical
+uniform int u_topology;  // 0=rectangular 1=cylindrical 2=toroidal 3=spherical 4=hexagonal 5=projective 6=mobius 7=klein
 uniform bool u_gaussian;
 
 #define PI 3.14159265358979
@@ -45,6 +45,42 @@ void main() {
   float d;
   if (u_topology == 3) {
     d = sphereDist(gridPos, u_bmu, u_size);
+  } else if (u_topology == 5) {
+    // RP²: real projective plane — identify antipodal points
+    float d1 = sphereDist(gridPos, u_bmu, u_size);
+    // Antipodal BMU: theta += π (x + size.x/2 mod size.x), phi → π-phi (y → size.y - y)
+    vec2 anti_bmu = vec2(mod(u_bmu.x + u_size.x * 0.5, u_size.x), u_size.y - u_bmu.y);
+    float d2 = sphereDist(gridPos, anti_bmu, u_size);
+    d = min(d1, d2);
+  } else if (u_topology == 4) {
+    // Hexagonal: odd CPU-rows (= odd GPU-rows when flipped) offset by 0.5 in x.
+    // u_bmu.x already includes the BMU's own hex offset (added on CPU side).
+    float cpuRow = u_size.y - 1.0 - gridPos.y;
+    float ox = mod(cpuRow, 2.0) >= 1.0 ? 0.5 : 0.0;
+    float dx = (gridPos.x + ox) - u_bmu.x;
+    float dy = (gridPos.y - u_bmu.y) * 0.8660254; // sqrt(3)/2
+    d = length(vec2(dx, dy));
+  } else if (u_topology == 6) {
+    // Möbius band: horizontal wraps with row flip, vertical is open
+    float flipRow = u_size.y - 1.0 - u_bmu.y;
+    float d0 = length(gridPos - u_bmu);
+    float d1 = length(vec2(gridPos.x - (u_bmu.x + u_size.x), gridPos.y - flipRow));
+    float d2 = length(vec2(gridPos.x - (u_bmu.x - u_size.x), gridPos.y - flipRow));
+    d = min(d0, min(d1, d2));
+  } else if (u_topology == 7) {
+    // Klein bottle: vertical wraps same, horizontal wraps with row flip (odd wraps)
+    float flipRow = u_size.y - 1.0 - u_bmu.y;
+    float best = 1e9;
+    // n in {-1,0,1}: odd n → flip row; m in {-1,0,1}: vertical wrap
+    for (int n = -1; n <= 1; n++) {
+      float er = (n == 0) ? u_bmu.y : flipRow;  // n=±1 are odd → flip
+      for (int m = -1; m <= 1; m++) {
+        float dy = gridPos.y - (er + float(m) * u_size.y);
+        float dx = gridPos.x - (u_bmu.x + float(n) * u_size.x);
+        best = min(best, dx*dx + dy*dy);
+      }
+    }
+    d = sqrt(best);
   } else {
     vec2 diff = gridPos - u_bmu;
     if (u_topology == 2) {
@@ -227,11 +263,11 @@ export class GLSOM {
     totalIter: number,
     blendDecay: number,
     radiusDecay: number,
-    topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical',
+    topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein',
     gaussian: boolean,
   ): void {
     const { rows, cols } = this
-    const diagonal = topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
+    const diagonal = topology === 'projective' ? Math.PI / 2 : topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
     const totalPixels = imageData.width * imageData.height
     const gl          = this.gl
     const mirror      = this.cpuMirror
@@ -279,15 +315,21 @@ export class GLSOM {
       gl.bindTexture(gl.TEXTURE_2D, this.textures[src])
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbos[dst])
 
-      // Convert BMU row from CPU order (top=0) to GPU order (bottom=0)
-      gl.uniform2f(this.uBMU, bmuCol, rows - 1 - bmuRow)
+      // Convert BMU row from CPU order (top=0) to GPU order (bottom=0).
+      // For hex: pre-apply the CPU-row-based x-offset so the shader stays consistent.
+      const bmuX = topology === 'hexagonal' ? bmuCol + (bmuRow % 2) * 0.5 : bmuCol
+      gl.uniform2f(this.uBMU, bmuX, rows - 1 - bmuRow)
       gl.uniform3f(this.uColor, r, g, b)
       gl.uniform1f(this.uBlend, blend)
       gl.uniform1f(this.uRadius, radius)
       gl.uniform1i(this.uTopology,
         topology === 'rectangular'  ? 0 :
         topology === 'cylindrical'  ? 1 :
-        topology === 'toroidal'     ? 2 : 3)
+        topology === 'toroidal'     ? 2 :
+        topology === 'hexagonal'    ? 4 :
+        topology === 'projective'   ? 5 :
+        topology === 'mobius'       ? 6 :
+        topology === 'klein'        ? 7 : 3)
       gl.uniform1i(this.uGaussian, gaussian ? 1 : 0)
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)

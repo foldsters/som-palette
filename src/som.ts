@@ -17,6 +17,8 @@
 const SCHED_START = 1.0
 const SCHED_END   = 0.01
 
+const HEX_DY = Math.sqrt(3) / 2
+
 export function runSOMBatch(
   palette: Float32Array,
   imageData: ImageData,
@@ -27,10 +29,11 @@ export function runSOMBatch(
   totalIter: number,
   blendDecay: number,
   radiusDecay: number,
-  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical',
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein',
   gaussian: boolean,
 ): void {
-  const diagonal = topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
+  const diagonal = topology === 'projective' ? Math.PI / 2 : topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
+  // mobius and klein use same Euclidean diagonal as rectangular/toroidal
   const totalPixels = imageData.width * imageData.height
   const blendExp    = Math.pow(10, 2 * blendDecay - 1)
   const radiusExp   = Math.pow(10, 2 * radiusDecay - 1)
@@ -72,13 +75,45 @@ export function runSOMBatch(
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         let dist: number
-        if (topology === 'spherical') {
-          const theta1 = (col     / cols) * 2 * Math.PI
-          const phi1   = (row     / rows) * Math.PI
-          const theta2 = (bmuCol  / cols) * 2 * Math.PI
-          const phi2   = (bmuRow  / rows) * Math.PI
+        if (topology === 'spherical' || topology === 'projective') {
+          const theta1 = (col    / cols) * 2 * Math.PI
+          const phi1   = (row    / rows) * Math.PI
+          const theta2 = (bmuCol / cols) * 2 * Math.PI
+          const phi2   = (bmuRow / rows) * Math.PI
           const dot = Math.sin(phi1)*Math.sin(phi2)*Math.cos(theta1 - theta2) + Math.cos(phi1)*Math.cos(phi2)
           dist = Math.acos(Math.max(-1, Math.min(1, dot)))
+          if (topology === 'projective') {
+            // RP²: antipodal point has theta+π, phi→π-phi
+            const dot2 = Math.sin(phi1)*Math.sin(Math.PI - phi2)*Math.cos(theta1 - theta2 - Math.PI) + Math.cos(phi1)*Math.cos(Math.PI - phi2)
+            dist = Math.min(dist, Math.acos(Math.max(-1, Math.min(1, dot2))))
+          }
+        } else if (topology === 'hexagonal') {
+          const dx = (col + (row % 2) * 0.5) - (bmuCol + (bmuRow % 2) * 0.5)
+          const dy = (row - bmuRow) * HEX_DY
+          dist = Math.sqrt(dx * dx + dy * dy)
+        } else if (topology === 'mobius') {
+          // Möbius band: horizontal wraps with row flip, vertical is open
+          const dx = col - bmuCol, dy = row - bmuRow
+          const flipRow = (rows - 1 - bmuRow) - row
+          const wrapDx1 = col - (bmuCol + cols), wrapDx2 = col - (bmuCol - cols)
+          dist = Math.min(
+            Math.sqrt(dx * dx + dy * dy),
+            Math.sqrt(wrapDx1 * wrapDx1 + flipRow * flipRow),
+            Math.sqrt(wrapDx2 * wrapDx2 + flipRow * flipRow),
+          )
+        } else if (topology === 'klein') {
+          // Klein bottle: vertical wraps same, horizontal wraps with row flip
+          const flipRow = rows - 1 - bmuRow
+          let best = Infinity
+          for (const n of [-1, 0, 1]) {   // horizontal wrap count (odd = flip)
+            const effRow = n % 2 !== 0 ? flipRow : bmuRow
+            for (const m of [-1, 0, 1]) { // vertical wrap count
+              const dy = row - (effRow + m * rows)
+              const dx = col - (bmuCol + n * cols)
+              best = Math.min(best, dx * dx + dy * dy)
+            }
+          }
+          dist = Math.sqrt(best)
         } else {
           let dx = col - bmuCol
           let dy = row - bmuRow

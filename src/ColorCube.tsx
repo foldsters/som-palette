@@ -84,6 +84,66 @@ function PaletteCloud({ palette, rows, cols, vizSpace, compress, lightMode }: { 
   )
 }
 
+// ─── Topology mesh geometry builders ─────────────────────────────────────────
+
+function makeMobiusGeometry(): THREE.BufferGeometry {
+  const NU = 128, NV = 16
+  const positions: number[] = [], uvs: number[] = [], indices: number[] = []
+  const R = 0.32, w = 0.14
+  for (let i = 0; i <= NU; i++) {
+    const u = (i / NU) * 2 * Math.PI
+    const cosU = Math.cos(u), sinU = Math.sin(u)
+    const cosHU = Math.cos(u / 2), sinHU = Math.sin(u / 2)
+    for (let j = 0; j <= NV; j++) {
+      const v = (j / NV - 0.5) * 2 * w
+      positions.push((R + v * cosHU) * cosU, v * sinHU, (R + v * cosHU) * sinU)
+      uvs.push(i / NU, j / NV)
+    }
+  }
+  for (let i = 0; i < NU; i++) {
+    for (let j = 0; j < NV; j++) {
+      const a = i * (NV + 1) + j
+      indices.push(a, a + NV + 1, a + 1, a + 1, a + NV + 1, a + NV + 2)
+    }
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  geo.setIndex(indices)
+  geo.computeVertexNormals()
+  return geo
+}
+
+function makeKleinGeometry(): THREE.BufferGeometry {
+  // Figure-8 immersion: x=(2+cos(u/2)sin(v)-sin(u/2)sin(2v))cos(u), etc.
+  const NU = 128, NV = 64, scale = 0.18
+  const positions: number[] = [], uvs: number[] = [], indices: number[] = []
+  for (let i = 0; i <= NU; i++) {
+    const u = (i / NU) * 2 * Math.PI
+    const cosU = Math.cos(u), sinU = Math.sin(u)
+    const cosHU = Math.cos(u / 2), sinHU = Math.sin(u / 2)
+    for (let j = 0; j <= NV; j++) {
+      const v = (j / NV) * 2 * Math.PI
+      const sinV = Math.sin(v), sin2V = Math.sin(2 * v)
+      const r = 2 + cosHU * sinV - sinHU * sin2V
+      positions.push(r * cosU * scale, (sinHU * sinV + cosHU * sin2V) * scale, r * sinU * scale)
+      uvs.push(i / NU, j / NV)
+    }
+  }
+  for (let i = 0; i < NU; i++) {
+    for (let j = 0; j < NV; j++) {
+      const a = i * (NV + 1) + j
+      indices.push(a, a + NV + 1, a + 1, a + 1, a + NV + 1, a + NV + 2)
+    }
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  geo.setIndex(indices)
+  geo.computeVertexNormals()
+  return geo
+}
+
 // ─── Frame geometry — computed once outside components so refs are stable ─────
 
 const CUBE_EDGES: [[number,number,number],[number,number,number]][] = [
@@ -209,7 +269,7 @@ export interface TopologySceneProps {
 function applyTopologyGeometry(mesh: THREE.Mesh, topology: string, rows: number, cols: number) {
   mesh.geometry.dispose()
   const mat = mesh.material as THREE.MeshBasicMaterial
-  if (topology === 'spherical') {
+  if (topology === 'spherical' || topology === 'projective') {
     const geo = new THREE.SphereGeometry(0.5, 64, 32)
     // Fix pole UVs: pin every pole vertex to U=0.5 to avoid star-burst seams.
     const uv = geo.attributes.uv as THREE.BufferAttribute
@@ -227,6 +287,21 @@ function applyTopologyGeometry(mesh: THREE.Mesh, topology: string, rows: number,
     const w = aspect >= 1 ? 0.7 : 0.7 * aspect
     const h = aspect >= 1 ? 0.7 / aspect : 0.7
     mesh.geometry = new THREE.PlaneGeometry(w, h)
+    mat.side = THREE.DoubleSide
+  } else if (topology === 'hexagonal') {
+    // True hex grid dimensions: width ≈ cols + 0.5 (stagger), height = rows * √3/2
+    const hexW = cols + 0.5
+    const hexH = rows * Math.sqrt(3) / 2
+    const aspect = hexW / hexH
+    const w = aspect >= 1 ? 0.7 : 0.7 * aspect
+    const h = aspect >= 1 ? 0.7 / aspect : 0.7
+    mesh.geometry = new THREE.PlaneGeometry(w, h)
+    mat.side = THREE.DoubleSide
+  } else if (topology === 'mobius') {
+    mesh.geometry = makeMobiusGeometry()
+    mat.side = THREE.DoubleSide
+  } else if (topology === 'klein') {
+    mesh.geometry = makeKleinGeometry()
     mat.side = THREE.DoubleSide
   } else {
     mesh.geometry = new THREE.TorusGeometry(0.35, 0.2, 64, 128)
@@ -292,8 +367,8 @@ export function TopologyScene({ paletteCanvasRef, lightModeRef, topologyRef, pal
       lastDimensions.current = { rows, cols }
       applyTopologyGeometry(mesh, topology, rows, cols)
       if (textureRef.current) {
-        textureRef.current.wrapS = topology === 'rectangular' ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping
-        textureRef.current.wrapT = topology === 'toroidal'    ? THREE.RepeatWrapping       : THREE.ClampToEdgeWrapping
+        textureRef.current.wrapS = (topology === 'rectangular' || topology === 'hexagonal' || topology === 'mobius') ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping
+        textureRef.current.wrapT = (topology === 'toroidal' || topology === 'klein') ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
         textureRef.current.needsUpdate = true
       }
     }
@@ -305,8 +380,8 @@ export function TopologyScene({ paletteCanvasRef, lightModeRef, topologyRef, pal
         textureRef.current?.dispose()
         const tex = new THREE.CanvasTexture(canvas)
         tex.colorSpace = THREE.SRGBColorSpace
-        tex.wrapS = topology === 'rectangular' ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping
-        tex.wrapT = topology === 'toroidal'    ? THREE.RepeatWrapping       : THREE.ClampToEdgeWrapping
+        tex.wrapS = (topology === 'rectangular' || topology === 'hexagonal' || topology === 'mobius') ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping
+        tex.wrapT = (topology === 'toroidal' || topology === 'klein') ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
         textureRef.current = tex
         lastSize.current = { w: canvas.width, h: canvas.height }
         mat.map = tex

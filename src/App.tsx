@@ -68,7 +68,7 @@ interface Params {
   quality: number
   blendDecay: number
   radiusDecay: number
-  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical'
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'projective' | 'mobius' | 'klein'
   gaussian: boolean
   randomInit: boolean
 }
@@ -727,12 +727,16 @@ export default function App() {
           }}>
             <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>TOPOLOGY</span>
             <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden' }}>
-              {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
-                const active = params.topology === mode.toLowerCase()
+              {([
+                ['rectangular', 'Rectangular'], ['cylindrical', 'Cylindrical'],
+                ['toroidal', 'Toroidal'], ['spherical', 'Spherical'],
+                ['projective', 'Projective'], ['mobius', 'Möbius'], ['klein', 'Klein'],
+              ] as const).map(([value, label]) => {
+                const active = params.topology === value
                 return (
                   <button
-                    key={mode}
-                    onClick={() => setParam('topology', mode.toLowerCase() as Params['topology'])}
+                    key={value}
+                    onClick={() => setParam('topology', value as Params['topology'])}
                     disabled={running}
                     style={{
                       padding: '3px 8px', border: 'none',
@@ -743,7 +747,7 @@ export default function App() {
                       letterSpacing: '0.05em',
                     }}
                   >
-                    {mode}
+                    {label}
                   </button>
                 )
               })}
