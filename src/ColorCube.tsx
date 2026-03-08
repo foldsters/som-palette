@@ -121,7 +121,7 @@ export default function ColorCube({ imageData, palette, rows, cols }: ColorCubeP
 
 export interface TopologySceneProps {
   topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical'
-  paletteCanvasRef: React.RefObject<HTMLCanvasElement>
+  paletteCanvasRef: React.RefObject<HTMLCanvasElement | null>
 }
 
 export function TopologyScene({ topology, paletteCanvasRef }: TopologySceneProps) {
