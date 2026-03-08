@@ -11,7 +11,7 @@ export const FRAME_TYPE: Record<VizSpace, FrameType> = {
 
 // ─── Conversion helpers ───────────────────────────────────────────────────────
 
-function linearize(c: number): number {
+export function linearize(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
 }
 

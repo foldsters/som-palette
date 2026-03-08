@@ -5,29 +5,53 @@ import { runSOMBatch, renderPalette, smoothPaletteCanvas } from './som'
 import { GLSOM } from './glSOM'
 import { type VizSpace, VIZ_AXES } from './colorSpaces'
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Theme ───────────────────────────────────────────────────────────────────
 
-const ACCENT = 'rgb(50, 100, 200)'
-const MUTED   = 'rgb(100, 140, 180)'
-const TEXT    = '#A9B7C5'
-const PANEL   = 'rgba(8, 18, 36, 0.9)'
-const BORDER  = 'rgba(50, 100, 200, 0.2)'
+interface Theme {
+  accent: string
+  muted: string
+  text: string
+  panel: string
+  border: string
+  bg: string
+  canvas3d: string
+}
+
+const DARK: Theme = {
+  accent:   'rgb(50, 100, 200)',
+  muted:    'rgb(100, 140, 180)',
+  text:     '#A9B7C5',
+  panel:    'rgba(8, 18, 36, 0.9)',
+  border:   'rgba(50, 100, 200, 0.2)',
+  bg:       '#030810',
+  canvas3d: '#030810',
+}
+
+const LIGHT: Theme = {
+  accent:   'rgb(40, 90, 190)',
+  muted:    'rgb(60, 110, 160)',
+  text:     '#1a2a3a',
+  panel:    'rgba(255, 255, 255, 0.82)',
+  border:   'rgba(50, 100, 200, 0.28)',
+  bg:       '#d8eaf8',
+  canvas3d: '#e4f0fa',
+}
 
 const CANVAS_SIZE = 400
 
 // ─── Shared button style ─────────────────────────────────────────────────────
 
-function btn(active = false, danger = false): React.CSSProperties {
+function btn(T: Theme, active = false, danger = false): React.CSSProperties {
   return {
     padding: '6px 16px',
     borderRadius: '6px',
-    border: `1px solid ${danger ? 'rgb(200,80,80)' : active ? ACCENT : BORDER}`,
+    border: `1px solid ${danger ? 'rgb(200,80,80)' : active ? T.accent : T.border}`,
     background: danger
       ? 'rgba(200,80,80,0.15)'
       : active
       ? 'rgba(50,100,200,0.2)'
       : 'transparent',
-    color: TEXT,
+    color: T.text,
     cursor: 'pointer',
     fontFamily: 'inherit',
     fontSize: '12px',
@@ -42,7 +66,7 @@ interface Params {
   rows: number
   cols: number
   quality: number
-  blendDecay: number  // 0.5 = linear, <0.5 = fast early drop, >0.5 = slow early drop
+  blendDecay: number
   radiusDecay: number
   topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical'
   gaussian: boolean
@@ -61,7 +85,6 @@ const DEFAULT_PARAMS: Params = {
 }
 
 // ─── Slider ──────────────────────────────────────────────────────────────────
-// Must live outside App so React doesn't remount it on every render.
 
 interface SliderProps {
   label: string
@@ -71,15 +94,17 @@ interface SliderProps {
   step: number
   display?: string
   disabled?: boolean
+  muted: string
+  text: string
   onChange: (val: number) => void
 }
 
-function Slider({ label, value, min, max, step, display, disabled, onChange }: SliderProps) {
+function Slider({ label, value, min, max, step, display, disabled, muted, text, onChange }: SliderProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px' }}>
-        <span style={{ color: MUTED }}>{label}</span>
-        <span style={{ color: TEXT }}>{display ?? value.toFixed(2)}</span>
+        <span style={{ color: muted }}>{label}</span>
+        <span style={{ color: text }}>{display ?? value.toFixed(2)}</span>
       </div>
       <input
         type="range"
@@ -95,16 +120,19 @@ function Slider({ label, value, min, max, step, display, disabled, onChange }: S
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [params, setParams]         = useState<Params>(DEFAULT_PARAMS)
-  const [running, setRunning]       = useState(false)
-  const [progress, setProgress]     = useState(0)
-  const [imageData, setImageData]   = useState<ImageData | null>(null)
+  const [params, setParams]           = useState<Params>(DEFAULT_PARAMS)
+  const [running, setRunning]         = useState(false)
+  const [progress, setProgress]       = useState(0)
+  const [imageData, setImageData]     = useState<ImageData | null>(null)
   const [paletteCopy, setPaletteCopy] = useState<Float32Array | null>(null)
-  const [dragging, setDragging]     = useState(false)
-  const [copiedHex, setCopiedHex]   = useState<string | null>(null)
-  const [collapsed, setCollapsed]   = useState(false)
-  const [vizSpace, setVizSpace]     = useState<VizSpace>('rgb')
-  const [lightMode, setLightMode]   = useState(false)
+  const [dragging, setDragging]       = useState(false)
+  const [copiedHex, setCopiedHex]     = useState<string | null>(null)
+  const [collapsed, setCollapsed]     = useState(false)
+  const [vizSpace, setVizSpace]       = useState<VizSpace>('rgb')
+  const [lightMode, setLightMode]     = useState(false)
+  const [compress, setCompress]       = useState(false)
+
+  const T = lightMode ? LIGHT : DARK
 
   const paletteCanvasRef = useRef<HTMLCanvasElement>(null)
   const imageCanvasRef   = useRef<HTMLCanvasElement>(null)
@@ -115,6 +143,20 @@ export default function App() {
   const paramsRef        = useRef(params)
   const glomRef          = useRef<GLSOM | null>(null)
   const usingGLRef       = useRef(false)
+
+  // Mutable refs passed into the R3F topology scene so useFrame always reads
+  // the latest values (plain props can go stale across R3F's separate reconciler).
+  const lightModeRef    = useRef(lightMode)
+  const topologyRef     = useRef(params.topology)
+  const paletteReadyRef = useRef(false)
+  const rowsRef         = useRef(params.rows)
+  const colsRef         = useRef(params.cols)
+  useEffect(() => { lightModeRef.current = lightMode },      [lightMode])
+  useEffect(() => { topologyRef.current = params.topology }, [params.topology])
+  useEffect(() => { rowsRef.current = params.rows },         [params.rows])
+  useEffect(() => { colsRef.current = params.cols },         [params.cols])
+  // True while training or after completion; reset to false only on palette reset.
+  useEffect(() => { if (running) paletteReadyRef.current = true }, [running])
 
   // Init WebGL2 SOM once
   useEffect(() => {
@@ -142,6 +184,7 @@ export default function App() {
     if (canvas) { const ctx = canvas.getContext('2d'); ctx?.clearRect(0, 0, canvas.width, canvas.height) }
     setProgress(0)
     setPaletteCopy(null)
+    paletteReadyRef.current = false
   }, [params.rows, params.cols, params.topology, params.gaussian])
 
   // ─── Image loading ─────────────────────────────────────────────────────────
@@ -154,7 +197,6 @@ export default function App() {
       if (!canvas) return
       const ctx = canvas.getContext('2d')
       if (!ctx) return
-      // Cover-fit into CANVAS_SIZE × CANVAS_SIZE
       const scale = Math.max(CANVAS_SIZE / img.width, CANVAS_SIZE / img.height)
       const w = img.width * scale
       const h = img.height * scale
@@ -172,11 +214,11 @@ export default function App() {
       if (pc) { const pctx = pc.getContext('2d'); pctx?.clearRect(0, 0, pc.width, pc.height) }
       setProgress(0)
       setPaletteCopy(null)
+      paletteReadyRef.current = false
     }
     img.src = src
   }, [])
 
-  // Load default planet image on mount
   useEffect(() => { loadFromSrc('/planet.jpeg') }, [loadFromSrc])
 
   // ─── Training ──────────────────────────────────────────────────────────────
@@ -198,7 +240,6 @@ export default function App() {
     totalIterRef.current = total
     iterRef.current = 0
 
-    // Init GL or CPU palette buffer
     const glsom = glomRef.current
     if (glsom) {
       glsom.init(p.rows, p.cols)
@@ -207,7 +248,6 @@ export default function App() {
       paletteRef.current = new Float32Array(p.rows * p.cols * 3)
     }
 
-    // Random initialization: sample palette cells from image pixels
     if (p.randomInit) {
       const totalPixels = data.width * data.height
       const palette = paletteRef.current
@@ -224,7 +264,6 @@ export default function App() {
     setProgress(0)
     setPaletteCopy(null)
 
-    // Run ~300 visual updates over the full training
     const batchSize = Math.max(10, Math.ceil(total / 300))
 
     function tick() {
@@ -238,7 +277,6 @@ export default function App() {
           from, to, totalIterRef.current,
           p.blendDecay, p.radiusDecay, p.topology, p.gaussian,
         )
-        // paletteRef.current already points to glsom.cpuMirror, synced by runBatch
       } else {
         runSOMBatch(
           paletteRef.current, data as ImageData,
@@ -250,7 +288,6 @@ export default function App() {
 
       iterRef.current = to
 
-      // Always update 2D canvas
       if (paletteCanvasRef.current) {
         renderPalette(paletteCanvasRef.current, paletteRef.current, p.rows, p.cols)
       }
@@ -328,9 +365,7 @@ export default function App() {
     e.preventDefault()
     setDragging(false)
     const file = e.dataTransfer.files[0]
-    if (file?.type.startsWith('image/')) {
-      loadFromSrc(URL.createObjectURL(file))
-    }
+    if (file?.type.startsWith('image/')) loadFromSrc(URL.createObjectURL(file))
   }, [loadFromSrc])
 
   // ─── Derived ───────────────────────────────────────────────────────────────
@@ -347,31 +382,42 @@ export default function App() {
     <div style={{
       display: 'flex', flexDirection: 'column', gap: '16px',
       padding: '24px', height: '100vh',
+      background: T.bg,
+      transition: 'background 0.2s',
     }}>
 
       {/* Header */}
-      <div>
-        <h1 style={{ color: ACCENT, fontSize: '16px', letterSpacing: '0.12em', fontWeight: 'normal' }}>
-          SOM PALETTE EXTRACTOR
-        </h1>
-        <p style={{ color: MUTED, fontSize: '11px', marginTop: '4px' }}>
-          Self-Organizing Map · drop an image to begin
-        </p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <h1 style={{ color: T.accent, fontSize: '16px', letterSpacing: '0.12em', fontWeight: 'normal' }}>
+            SOM PALETTE EXTRACTOR
+          </h1>
+          <p style={{ color: T.muted, fontSize: '11px', marginTop: '4px' }}>
+            Self-Organizing Map · drop an image to begin
+          </p>
+        </div>
+        <button
+          onClick={() => setLightMode(m => !m)}
+          style={{ ...btn(T), padding: '5px 12px', marginTop: '2px' }}
+          title="Toggle light / dark"
+        >
+          {lightMode ? '◑ dark' : '◐ light'}
+        </button>
       </div>
 
       {/* Settings pane */}
-      <div style={{ background: PANEL, borderRadius: '10px', border: `1px solid ${BORDER}` }}>
+      <div style={{ background: T.panel, borderRadius: '10px', border: `1px solid ${T.border}`, transition: 'background 0.2s' }}>
 
         {/* Always-visible row: action buttons + collapse toggle */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px' }}>
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(!running, running)}>
+            <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(T, !running, running)}>
               {running ? '■ Stop' : '▶ Draw'}
             </button>
           </div>
           <button
             onClick={() => setCollapsed(c => !c)}
-            style={{ ...btn(), padding: '4px 10px', fontSize: '14px', lineHeight: 1 }}
+            style={{ ...btn(T), padding: '4px 10px', fontSize: '14px', lineHeight: 1 }}
           >
             {collapsed ? '▾' : '▴'}
           </button>
@@ -379,19 +425,19 @@ export default function App() {
 
         {/* Collapsible body */}
         {!collapsed && (
-          <div style={{ padding: '0 16px 16px', borderTop: `1px solid ${BORDER}` }}>
+          <div style={{ padding: '0 16px 16px', borderTop: `1px solid ${T.border}` }}>
 
             {/* Grid size */}
             <div style={{ marginTop: '14px' }}>
               {(['rows', 'cols'] as const).map(axis => (
                 <div key={axis} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: '11px', color: MUTED, width: '32px' }}>{axis.toUpperCase()}</span>
+                  <span style={{ fontSize: '11px', color: T.muted, width: '32px' }}>{axis.toUpperCase()}</span>
                   {[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].map(n => (
                     <button
                       key={n}
                       onClick={() => setParam(axis, n)}
                       disabled={running}
-                      style={{ ...btn(params[axis] === n), fontSize: '11px', padding: '4px 10px' }}
+                      style={{ ...btn(T, params[axis] === n), fontSize: '11px', padding: '4px 10px' }}
                     >
                       {n}
                     </button>
@@ -407,44 +453,18 @@ export default function App() {
               gap: '14px 28px',
               marginBottom: '16px',
             }}>
-              <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} onChange={v => setParam('quality', v)} />
-              <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} onChange={v => setParam('blendDecay', v)} />
-              <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} onChange={v => setParam('radiusDecay', v)} />
+              <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} muted={T.muted} text={T.text} onChange={v => setParam('quality', v)} />
+              <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('blendDecay', v)} />
+              <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('radiusDecay', v)} />
             </div>
 
             {/* Toggles row */}
             <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
 
-              {/* Topology toggle */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>TOPOLOGY</span>
-                <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-                  {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
-                    const active = params.topology === mode.toLowerCase()
-                    return (
-                      <button
-                        key={mode}
-                        onClick={() => setParam('topology', mode.toLowerCase() as Params['topology'])}
-                        disabled={running}
-                        style={{
-                          padding: '6px 16px', border: 'none',
-                          cursor: running ? 'not-allowed' : 'pointer',
-                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                          color: active ? ACCENT : MUTED,
-                          fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
-                        }}
-                      >
-                        {mode}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
               {/* Mask toggle */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>MASK</span>
-                <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>MASK</span>
+                <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '6px', overflow: 'hidden' }}>
                   {(['Hard', 'Gaussian'] as const).map(mode => {
                     const active = (mode === 'Gaussian') === params.gaussian
                     return (
@@ -456,7 +476,7 @@ export default function App() {
                           padding: '6px 16px', border: 'none',
                           cursor: running ? 'not-allowed' : 'pointer',
                           background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                          color: active ? ACCENT : MUTED,
+                          color: active ? T.accent : T.muted,
                           fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
                         }}
                       >
@@ -469,8 +489,8 @@ export default function App() {
 
               {/* Init toggle */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>INIT</span>
-                <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>INIT</span>
+                <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '6px', overflow: 'hidden' }}>
                   {(['Zero', 'Random'] as const).map(mode => {
                     const active = (mode === 'Random') === params.randomInit
                     return (
@@ -482,7 +502,7 @@ export default function App() {
                           padding: '6px 16px', border: 'none',
                           cursor: running ? 'not-allowed' : 'pointer',
                           background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                          color: active ? ACCENT : MUTED,
+                          color: active ? T.accent : T.muted,
                           fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
                         }}
                       >
@@ -504,8 +524,8 @@ export default function App() {
         {/* Source image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
-            <label style={{ ...btn(), cursor: 'pointer' }}>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
+            <label style={{ ...btn(T), cursor: 'pointer' }}>
               Upload
               <input
                 type="file"
@@ -522,7 +542,7 @@ export default function App() {
           <div
             style={{
               position: 'relative', borderRadius: '10px', overflow: 'hidden',
-              border: `1px solid ${dragging ? ACCENT : BORDER}`,
+              border: `1px solid ${dragging ? T.accent : T.border}`,
               transition: 'border-color 0.15s', cursor: 'pointer',
               width: CANVAS_SIZE, height: CANVAS_SIZE,
             }}
@@ -535,7 +555,7 @@ export default function App() {
               <div style={{
                 position: 'absolute', inset: 0, display: 'flex',
                 alignItems: 'center', justifyContent: 'center',
-                background: 'rgba(0,10,30,0.75)', color: ACCENT,
+                background: 'rgba(0,10,30,0.75)', color: T.accent,
                 fontSize: '13px', letterSpacing: '0.1em',
               }}>
                 DROP IMAGE
@@ -547,17 +567,17 @@ export default function App() {
         {/* Palette canvas */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
             <div style={{ display: 'flex', gap: '6px' }}>
-              <button onClick={handleSmooth} disabled={running} style={btn()}>Smooth</button>
-              <button onClick={handleExportPNG} disabled={running} style={btn()}>Export PNG</button>
-              <button onClick={handleExportGPL} disabled={running} style={btn()}>Export GPL</button>
+              <button onClick={handleSmooth} disabled={running} style={btn(T)}>Smooth</button>
+              <button onClick={handleExportPNG} disabled={running} style={btn(T)}>Export PNG</button>
+              <button onClick={handleExportGPL} disabled={running} style={btn(T)}>Export GPL</button>
             </div>
           </div>
           <div style={{
             position: 'relative', borderRadius: '10px', overflow: 'hidden',
-            border: `1px solid ${BORDER}`,
-            background: '#050d1a',
+            border: `1px solid ${T.border}`,
+            background: lightMode ? '#c8dff0' : '#050d1a',
           }}>
             <canvas
               ref={paletteCanvasRef}
@@ -572,14 +592,13 @@ export default function App() {
               }}
               onClick={handlePaletteClick}
             />
-            {/* Copy toast */}
             {copiedHex && (
               <div style={{
                 position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
-                background: 'rgba(0,8,20,0.92)', border: `1px solid ${ACCENT}`,
+                background: lightMode ? 'rgba(220,234,248,0.95)' : 'rgba(0,8,20,0.92)', border: `1px solid ${T.accent}`,
                 borderRadius: '6px', padding: '5px 12px',
                 display: 'flex', alignItems: 'center', gap: '8px',
-                fontSize: '12px', color: TEXT, pointerEvents: 'none',
+                fontSize: '12px', color: T.text, pointerEvents: 'none',
               }}>
                 <span style={{
                   display: 'inline-block', width: '12px', height: '12px',
@@ -591,11 +610,11 @@ export default function App() {
             {running && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
-                background: 'rgba(0,8,20,0.85)', padding: '8px 12px',
+                background: lightMode ? 'rgba(220,234,248,0.92)' : 'rgba(0,8,20,0.85)', padding: '8px 12px',
               }}>
                 <div style={{
                   display: 'flex', justifyContent: 'space-between',
-                  fontSize: '10px', color: MUTED, marginBottom: '5px',
+                  fontSize: '10px', color: T.muted, marginBottom: '5px',
                 }}>
                   <span>training</span>
                   <span>{Math.round(progress * 100)}%</span>
@@ -603,7 +622,7 @@ export default function App() {
                 <div style={{ height: '3px', background: 'rgba(50,100,200,0.2)', borderRadius: '2px' }}>
                   <div style={{
                     height: '100%', width: `${progress * 100}%`,
-                    background: ACCENT, borderRadius: '2px',
+                    background: T.accent, borderRadius: '2px',
                     transition: 'width 0.05s linear',
                   }} />
                 </div>
@@ -617,50 +636,21 @@ export default function App() {
       {/* 3D views */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px' }}>
 
-          {/* RGB cube — always shown */}
+        {/* RGB cube — always shown */}
+        <div style={{
+          flex: 1, borderRadius: '10px', overflow: 'hidden',
+          border: `1px solid ${T.border}`,
+          background: T.canvas3d,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          {/* Header */}
           <div style={{
-            flex: 1, borderRadius: '10px', overflow: 'hidden',
-            border: `1px solid ${BORDER}`, background: '#030810',
-            position: 'relative',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '6px 10px', borderBottom: `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0,
           }}>
-            <Canvas
-              camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
-              style={{ width: '100%', height: '100%' }}
-              gl={{ antialias: true }}
-            >
-              <ColorCube
-                imageData={imageData}
-                palette={paletteCopy}
-                rows={params.rows}
-                cols={params.cols}
-                vizSpace={vizSpace}
-                lightMode={lightMode}
-              />
-            </Canvas>
-            {/* Light mode toggle */}
-            <button
-              onClick={() => setLightMode(m => !m)}
-              title="Toggle light background"
-              style={{
-                position: 'absolute', top: 8, right: 8,
-                pointerEvents: 'all',
-                padding: '3px 8px', borderRadius: '4px',
-                border: `1px solid ${lightMode ? ACCENT : BORDER}`,
-                background: lightMode ? 'rgba(50,100,200,0.15)' : 'rgba(3,8,16,0.75)',
-                color: lightMode ? ACCENT : MUTED,
-                fontFamily: 'inherit', fontSize: '10px',
-                cursor: 'pointer', backdropFilter: 'blur(4px)',
-              }}
-            >
-              {lightMode ? '◑ dark' : '◐ light'}
-            </button>
-
-            {/* Color space selector */}
-            <div style={{
-              position: 'absolute', bottom: 10, left: 0, right: 0,
-              display: 'flex', justifyContent: 'center', gap: '4px',
-              pointerEvents: 'none',
-            }}>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>COLOR SPACE</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
               {(['rgb', 'oklab', 'oklch', 'hsv', 'hsl'] as VizSpace[]).map(space => {
                 const [x, y, z] = VIZ_AXES[space]
                 const active = vizSpace === space
@@ -669,14 +659,12 @@ export default function App() {
                     key={space}
                     onClick={() => setVizSpace(space)}
                     style={{
-                      pointerEvents: 'all',
                       padding: '3px 8px', borderRadius: '4px',
-                      border: `1px solid ${active ? ACCENT : BORDER}`,
-                      background: active ? 'rgba(50,100,200,0.3)' : 'rgba(3,8,16,0.75)',
-                      color: active ? ACCENT : MUTED,
+                      border: `1px solid ${active ? T.accent : T.border}`,
+                      background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                      color: active ? T.accent : T.muted,
                       fontFamily: 'inherit', fontSize: '10px',
-                      cursor: 'pointer', backdropFilter: 'blur(4px)',
-                      letterSpacing: '0.05em',
+                      cursor: 'pointer', letterSpacing: '0.05em',
                     }}
                     title={`${x} · ${y} · ${z}`}
                   >
@@ -684,27 +672,98 @@ export default function App() {
                   </button>
                 )
               })}
+              <div style={{ width: '1px', height: '14px', background: T.border, margin: '0 2px' }} />
+              <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden' }}>
+                {([false, true] as const).map(val => {
+                  const active = compress === val
+                  return (
+                    <button
+                      key={String(val)}
+                      onClick={() => setCompress(val)}
+                      style={{
+                        padding: '3px 8px', border: 'none',
+                        background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                        color: active ? T.accent : T.muted,
+                        fontFamily: 'inherit', fontSize: '10px',
+                        cursor: 'pointer', letterSpacing: '0.05em',
+                      }}
+                    >
+                      {val ? 'Compressed' : 'True Color'}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           </div>
+          <Canvas
+            camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
+            style={{ flex: 1 }}
+            gl={{ antialias: true }}
+          >
+            <ColorCube
+              imageData={imageData}
+              palette={paletteCopy}
+              rows={params.rows}
+              cols={params.cols}
+              vizSpace={vizSpace}
+              lightMode={lightMode}
+              compress={compress}
+            />
+          </Canvas>
+        </div>
 
-          {/* Topology 3D view — shown for non-rectangular topologies */}
-          {params.topology !== 'rectangular' && (
-            <div style={{
-              flex: 1, borderRadius: '10px', overflow: 'hidden',
-              border: `1px solid ${BORDER}`, background: '#030810',
-            }}>
-              <Canvas
-                camera={{ position: [0, 0, 1.5], fov: 45 }}
-                style={{ width: '100%', height: '100%' }}
-                gl={{ antialias: true }}
-              >
-                <TopologyScene
-                  topology={params.topology}
-                  paletteCanvasRef={paletteCanvasRef}
-                />
-              </Canvas>
+        {/* Topology 3D view — always shown */}
+        <div style={{
+          flex: 1, borderRadius: '10px', overflow: 'hidden',
+          border: `1px solid ${T.border}`,
+          background: T.canvas3d,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          {/* Header */}
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '6px 10px', borderBottom: `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0,
+          }}>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>TOPOLOGY</span>
+            <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden' }}>
+              {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
+                const active = params.topology === mode.toLowerCase()
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => setParam('topology', mode.toLowerCase() as Params['topology'])}
+                    disabled={running}
+                    style={{
+                      padding: '3px 8px', border: 'none',
+                      cursor: running ? 'not-allowed' : 'pointer',
+                      background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                      color: active ? T.accent : T.muted,
+                      fontFamily: 'inherit', fontSize: '10px', transition: 'all 0.15s',
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    {mode}
+                  </button>
+                )
+              })}
             </div>
-          )}
+          </div>
+          <Canvas
+            camera={{ position: [0, 0, 1.5], fov: 45 }}
+            style={{ flex: 1 }}
+            gl={{ antialias: true }}
+          >
+            <TopologyScene
+              paletteCanvasRef={paletteCanvasRef}
+              lightModeRef={lightModeRef}
+              topologyRef={topologyRef}
+              paletteReadyRef={paletteReadyRef}
+              rowsRef={rowsRef}
+              colsRef={colsRef}
+            />
+          </Canvas>
+        </div>
 
       </div>
 
