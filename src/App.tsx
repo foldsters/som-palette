@@ -3,6 +3,7 @@ import { Canvas } from '@react-three/fiber'
 import ColorCube, { TopologyScene } from './ColorCube'
 import { runSOMBatch, renderPalette, smoothPaletteCanvas } from './som'
 import { GLSOM } from './glSOM'
+import { type VizSpace, VIZ_AXES } from './colorSpaces'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -56,7 +57,7 @@ const DEFAULT_PARAMS: Params = {
   radiusDecay: 0.5,
   topology: 'toroidal',
   gaussian: true,
-  randomInit: false,
+  randomInit: true,
 }
 
 // ─── Slider ──────────────────────────────────────────────────────────────────
@@ -101,6 +102,9 @@ export default function App() {
   const [paletteCopy, setPaletteCopy] = useState<Float32Array | null>(null)
   const [dragging, setDragging]     = useState(false)
   const [copiedHex, setCopiedHex]   = useState<string | null>(null)
+  const [collapsed, setCollapsed]   = useState(false)
+  const [vizSpace, setVizSpace]     = useState<VizSpace>('rgb')
+  const [lightMode, setLightMode]   = useState(false)
 
   const paletteCanvasRef = useRef<HTMLCanvasElement>(null)
   const imageCanvasRef   = useRef<HTMLCanvasElement>(null)
@@ -158,6 +162,16 @@ export default function App() {
       ctx.drawImage(img, (CANVAS_SIZE - w) / 2, (CANVAS_SIZE - h) / 2, w, h)
       const data = ctx.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE)
       setImageData(data)
+      // Reset palette
+      if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; setRunning(false) }
+      const { rows, cols } = paramsRef.current
+      const glsom = glomRef.current
+      if (glsom) { glsom.init(rows, cols); paletteRef.current = glsom.cpuMirror }
+      else { paletteRef.current = new Float32Array(rows * cols * 3) }
+      const pc = paletteCanvasRef.current
+      if (pc) { const pctx = pc.getContext('2d'); pctx?.clearRect(0, 0, pc.width, pc.height) }
+      setProgress(0)
+      setPaletteCopy(null)
     }
     img.src = src
   }, [])
@@ -345,8 +359,147 @@ export default function App() {
         </p>
       </div>
 
+      {/* Settings pane */}
+      <div style={{ background: PANEL, borderRadius: '10px', border: `1px solid ${BORDER}` }}>
+
+        {/* Always-visible row: action buttons + collapse toggle */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px' }}>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(!running, running)}>
+              {running ? '■ Stop' : '▶ Draw'}
+            </button>
+          </div>
+          <button
+            onClick={() => setCollapsed(c => !c)}
+            style={{ ...btn(), padding: '4px 10px', fontSize: '14px', lineHeight: 1 }}
+          >
+            {collapsed ? '▾' : '▴'}
+          </button>
+        </div>
+
+        {/* Collapsible body */}
+        {!collapsed && (
+          <div style={{ padding: '0 16px 16px', borderTop: `1px solid ${BORDER}` }}>
+
+            {/* Grid size */}
+            <div style={{ marginTop: '14px' }}>
+              {(['rows', 'cols'] as const).map(axis => (
+                <div key={axis} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '11px', color: MUTED, width: '32px' }}>{axis.toUpperCase()}</span>
+                  {[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].map(n => (
+                    <button
+                      key={n}
+                      onClick={() => setParam(axis, n)}
+                      disabled={running}
+                      style={{ ...btn(params[axis] === n), fontSize: '11px', padding: '4px 10px' }}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            {/* Sliders */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+              gap: '14px 28px',
+              marginBottom: '16px',
+            }}>
+              <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} onChange={v => setParam('quality', v)} />
+              <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} onChange={v => setParam('blendDecay', v)} />
+              <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} onChange={v => setParam('radiusDecay', v)} />
+            </div>
+
+            {/* Toggles row */}
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+
+              {/* Topology toggle */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>TOPOLOGY</span>
+                <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+                  {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
+                    const active = params.topology === mode.toLowerCase()
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => setParam('topology', mode.toLowerCase() as Params['topology'])}
+                        disabled={running}
+                        style={{
+                          padding: '6px 16px', border: 'none',
+                          cursor: running ? 'not-allowed' : 'pointer',
+                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                          color: active ? ACCENT : MUTED,
+                          fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                        }}
+                      >
+                        {mode}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Mask toggle */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>MASK</span>
+                <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+                  {(['Hard', 'Gaussian'] as const).map(mode => {
+                    const active = (mode === 'Gaussian') === params.gaussian
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => setParam('gaussian', mode === 'Gaussian')}
+                        disabled={running}
+                        style={{
+                          padding: '6px 16px', border: 'none',
+                          cursor: running ? 'not-allowed' : 'pointer',
+                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                          color: active ? ACCENT : MUTED,
+                          fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                        }}
+                      >
+                        {mode}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Init toggle */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>INIT</span>
+                <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+                  {(['Zero', 'Random'] as const).map(mode => {
+                    const active = (mode === 'Random') === params.randomInit
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => setParam('randomInit', mode === 'Random')}
+                        disabled={running}
+                        style={{
+                          padding: '6px 16px', border: 'none',
+                          cursor: running ? 'not-allowed' : 'pointer',
+                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                          color: active ? ACCENT : MUTED,
+                          fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                        }}
+                      >
+                        {mode}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Image + Palette row */}
-      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
+      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end' }}>
 
         {/* Source image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -393,7 +546,14 @@ export default function App() {
 
         {/* Palette canvas */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minWidth: 0 }}>
-          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button onClick={handleSmooth} disabled={running} style={btn()}>Smooth</button>
+              <button onClick={handleExportPNG} disabled={running} style={btn()}>Export PNG</button>
+              <button onClick={handleExportGPL} disabled={running} style={btn()}>Export GPL</button>
+            </div>
+          </div>
           <div style={{
             position: 'relative', borderRadius: '10px', overflow: 'hidden',
             border: `1px solid ${BORDER}`,
@@ -454,14 +614,14 @@ export default function App() {
 
       </div>
 
-      {/* 3D views + floating controls */}
-      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
-        <div style={{ display: 'flex', gap: '8px', width: '100%', height: '100%' }}>
+      {/* 3D views */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px' }}>
 
           {/* RGB cube — always shown */}
           <div style={{
             flex: 1, borderRadius: '10px', overflow: 'hidden',
             border: `1px solid ${BORDER}`, background: '#030810',
+            position: 'relative',
           }}>
             <Canvas
               camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
@@ -473,8 +633,58 @@ export default function App() {
                 palette={paletteCopy}
                 rows={params.rows}
                 cols={params.cols}
+                vizSpace={vizSpace}
+                lightMode={lightMode}
               />
             </Canvas>
+            {/* Light mode toggle */}
+            <button
+              onClick={() => setLightMode(m => !m)}
+              title="Toggle light background"
+              style={{
+                position: 'absolute', top: 8, right: 8,
+                pointerEvents: 'all',
+                padding: '3px 8px', borderRadius: '4px',
+                border: `1px solid ${lightMode ? ACCENT : BORDER}`,
+                background: lightMode ? 'rgba(50,100,200,0.15)' : 'rgba(3,8,16,0.75)',
+                color: lightMode ? ACCENT : MUTED,
+                fontFamily: 'inherit', fontSize: '10px',
+                cursor: 'pointer', backdropFilter: 'blur(4px)',
+              }}
+            >
+              {lightMode ? '◑ dark' : '◐ light'}
+            </button>
+
+            {/* Color space selector */}
+            <div style={{
+              position: 'absolute', bottom: 10, left: 0, right: 0,
+              display: 'flex', justifyContent: 'center', gap: '4px',
+              pointerEvents: 'none',
+            }}>
+              {(['rgb', 'oklab', 'oklch', 'hsv', 'hsl'] as VizSpace[]).map(space => {
+                const [x, y, z] = VIZ_AXES[space]
+                const active = vizSpace === space
+                return (
+                  <button
+                    key={space}
+                    onClick={() => setVizSpace(space)}
+                    style={{
+                      pointerEvents: 'all',
+                      padding: '3px 8px', borderRadius: '4px',
+                      border: `1px solid ${active ? ACCENT : BORDER}`,
+                      background: active ? 'rgba(50,100,200,0.3)' : 'rgba(3,8,16,0.75)',
+                      color: active ? ACCENT : MUTED,
+                      fontFamily: 'inherit', fontSize: '10px',
+                      cursor: 'pointer', backdropFilter: 'blur(4px)',
+                      letterSpacing: '0.05em',
+                    }}
+                    title={`${x} · ${y} · ${z}`}
+                  >
+                    {space.toUpperCase()}
+                  </button>
+                )
+              })}
+            </div>
           </div>
 
           {/* Topology 3D view — shown for non-rectangular topologies */}
@@ -496,141 +706,6 @@ export default function App() {
             </div>
           )}
 
-        </div>
-
-        {/* Floating controls */}
-        <div style={{
-          position: 'absolute', top: 12, left: 12,
-          background: PANEL, borderRadius: '10px', padding: '16px',
-          border: `1px solid ${BORDER}`, backdropFilter: 'blur(8px)',
-        }}>
-
-          {/* Grid size */}
-          {(['rows', 'cols'] as const).map(axis => (
-            <div key={axis} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '11px', color: MUTED, width: '32px' }}>{axis.toUpperCase()}</span>
-              {[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].map(n => (
-                <button
-                  key={n}
-                  onClick={() => setParam(axis, n)}
-                  disabled={running}
-                  style={{ ...btn(params[axis] === n), fontSize: '11px', padding: '4px 10px' }}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-          ))}
-
-          {/* Sliders */}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-            gap: '14px 28px',
-            marginBottom: '16px',
-          }}>
-            <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} onChange={v => setParam('quality', v)} />
-            <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} onChange={v => setParam('blendDecay', v)} />
-            <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} onChange={v => setParam('radiusDecay', v)} />
-          </div>
-
-          {/* Controls + actions */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-
-            {/* Topology toggle */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>TOPOLOGY</span>
-            <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-              {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
-                const active = params.topology === mode.toLowerCase()
-                return (
-                  <button
-                    key={mode}
-                    onClick={() => setParam('topology', mode.toLowerCase() as Params['topology'])}
-                    disabled={running}
-                    style={{
-                      padding: '6px 16px', border: 'none',
-                      cursor: running ? 'not-allowed' : 'pointer',
-                      background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                      color: active ? ACCENT : MUTED,
-                      fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
-                    }}
-                  >
-                    {mode}
-                  </button>
-                )
-              })}
-            </div>
-            </div>
-
-            {/* Neighbourhood toggle */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>MASK</span>
-            <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-              {(['Hard', 'Gaussian'] as const).map(mode => {
-                const active = (mode === 'Gaussian') === params.gaussian
-                return (
-                  <button
-                    key={mode}
-                    onClick={() => setParam('gaussian', mode === 'Gaussian')}
-                    disabled={running}
-                    style={{
-                      padding: '6px 16px', border: 'none',
-                      cursor: running ? 'not-allowed' : 'pointer',
-                      background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                      color: active ? ACCENT : MUTED,
-                      fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
-                    }}
-                  >
-                    {mode}
-                  </button>
-                )
-              })}
-            </div>
-            </div>
-
-            {/* Init toggle */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>INIT</span>
-              <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-                {(['Zero', 'Random'] as const).map(mode => {
-                  const active = (mode === 'Random') === params.randomInit
-                  return (
-                    <button
-                      key={mode}
-                      onClick={() => setParam('randomInit', mode === 'Random')}
-                      disabled={running}
-                      style={{
-                        padding: '6px 16px', border: 'none',
-                        cursor: running ? 'not-allowed' : 'pointer',
-                        background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                        color: active ? ACCENT : MUTED,
-                        fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
-                      }}
-                    >
-                      {mode}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-          </div>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(!running, running)}>
-              {running ? '■ Stop' : '▶ Draw'}
-            </button>
-            <button onClick={handleSmooth} disabled={running} style={btn()}>Smooth</button>
-            <button onClick={handleExportPNG} disabled={running} style={btn()}>Export PNG</button>
-            <button onClick={handleExportGPL} disabled={running} style={btn()}>Export GPL</button>
-          </div>
-          </div>
-        </div>
-
-        <span style={{ position: 'absolute', bottom: 10, left: 0, right: 0, fontSize: '10px', color: MUTED, opacity: 0.4, textAlign: 'center', pointerEvents: 'none' }}>
-          drag to orbit · scroll to zoom · ctrl+drag to pan
-        </span>
       </div>
 
     </div>
