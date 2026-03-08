@@ -68,7 +68,7 @@ interface Params {
   quality: number
   blendDecay: number
   radiusDecay: number
-  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'projective' | 'mobius' | 'klein'
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone'
   gaussian: boolean
   randomInit: boolean
 }
@@ -76,7 +76,7 @@ interface Params {
 const DEFAULT_PARAMS: Params = {
   rows: 8,
   cols: 8,
-  quality: 3,
+  quality: 5.4,
   blendDecay: 0.5,
   radiusDecay: 0.5,
   topology: 'toroidal',
@@ -97,9 +97,10 @@ interface SliderProps {
   muted: string
   text: string
   onChange: (val: number) => void
+  onRelease?: () => void
 }
 
-function Slider({ label, value, min, max, step, display, disabled, muted, text, onChange }: SliderProps) {
+function Slider({ label, value, min, max, step, display, disabled, muted, text, onChange, onRelease }: SliderProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px' }}>
@@ -112,6 +113,7 @@ function Slider({ label, value, min, max, step, display, disabled, muted, text, 
         value={value}
         disabled={disabled}
         onChange={e => onChange(parseFloat(e.target.value))}
+        onPointerUp={onRelease}
       />
     </div>
   )
@@ -125,6 +127,7 @@ export default function App() {
   const [progress, setProgress]       = useState(0)
   const [imageData, setImageData]     = useState<ImageData | null>(null)
   const [paletteCopy, setPaletteCopy] = useState<Float32Array | null>(null)
+  const [autoRun, setAutoRun]         = useState(false)
   const [dragging, setDragging]       = useState(false)
   const [copiedHex, setCopiedHex]     = useState<string | null>(null)
   const [collapsed, setCollapsed]     = useState(false)
@@ -189,7 +192,7 @@ export default function App() {
 
   // ─── Image loading ─────────────────────────────────────────────────────────
 
-  const loadFromSrc = useCallback((src: string) => {
+  const loadFromSrc = useCallback((src: string, saveToCache = true) => {
     const img = new Image()
     img.crossOrigin = 'anonymous'
     img.onload = () => {
@@ -197,12 +200,19 @@ export default function App() {
       if (!canvas) return
       const ctx = canvas.getContext('2d')
       if (!ctx) return
-      const scale = Math.max(CANVAS_SIZE / img.width, CANVAS_SIZE / img.height)
-      const w = img.width * scale
-      const h = img.height * scale
+      // Fit (contain) — scale to fill canvas without cropping
+      const scale = Math.min(CANVAS_SIZE / img.width, CANVAS_SIZE / img.height)
+      const w = Math.round(img.width * scale)
+      const h = Math.round(img.height * scale)
+      const x = Math.round((CANVAS_SIZE - w) / 2)
+      const y = Math.round((CANVAS_SIZE - h) / 2)
       ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
-      ctx.drawImage(img, (CANVAS_SIZE - w) / 2, (CANVAS_SIZE - h) / 2, w, h)
-      const data = ctx.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE)
+      ctx.drawImage(img, x, y, w, h)
+      if (saveToCache) {
+        try { localStorage.setItem('som_image', canvas.toDataURL('image/jpeg', 0.85)) } catch {}
+      }
+      // Sample only the image region (not blank letterbox areas)
+      const data = ctx.getImageData(x, y, w, h)
       setImageData(data)
       // Reset palette
       if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; setRunning(false) }
@@ -219,7 +229,17 @@ export default function App() {
     img.src = src
   }, [])
 
-  useEffect(() => { loadFromSrc('/planet.jpeg') }, [loadFromSrc])
+  const clearImage = useCallback(() => {
+    localStorage.removeItem('som_image')
+    const canvas = imageCanvasRef.current
+    if (canvas) canvas.getContext('2d')?.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
+    setImageData(null)
+  }, [])
+
+  useEffect(() => {
+    const cached = localStorage.getItem('som_image')
+    loadFromSrc(cached ?? '/planet.jpeg', !cached)
+  }, [loadFromSrc])
 
   // ─── Training ──────────────────────────────────────────────────────────────
 
@@ -306,6 +326,18 @@ export default function App() {
 
     animRef.current = requestAnimationFrame(tick)
   }, [imageData])
+
+  // Auto-restart when button-style params or image change while autoRun is on.
+  // Slider params (quality, blendDecay, radiusDecay) use onBlur instead (see triggerAutoRun).
+  useEffect(() => {
+    if (!autoRun || !imageData) return
+    startTraining()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.rows, params.cols, params.topology, params.gaussian, params.randomInit, imageData, autoRun])
+
+  const triggerAutoRun = useCallback(() => {
+    if (autoRun && imageData) startTraining()
+  }, [autoRun, imageData, startTraining])
 
   // ─── Actions ───────────────────────────────────────────────────────────────
 
@@ -414,6 +446,9 @@ export default function App() {
             <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(T, !running, running)}>
               {running ? '■ Stop' : '▶ Draw'}
             </button>
+            <button onClick={() => setAutoRun(a => !a)} disabled={!imageData} style={btn(T, autoRun)}>
+              Auto
+            </button>
           </div>
           <button
             onClick={() => setCollapsed(c => !c)}
@@ -453,9 +488,9 @@ export default function App() {
               gap: '14px 28px',
               marginBottom: '16px',
             }}>
-              <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} muted={T.muted} text={T.text} onChange={v => setParam('quality', v)} />
-              <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('blendDecay', v)} />
-              <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('radiusDecay', v)} />
+              <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} muted={T.muted} text={T.text} onChange={v => setParam('quality', v)} onRelease={triggerAutoRun} />
+              <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('blendDecay', v)} onRelease={triggerAutoRun} />
+              <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('radiusDecay', v)} onRelease={triggerAutoRun} />
             </div>
 
             {/* Toggles row */}
@@ -525,19 +560,22 @@ export default function App() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
-            <label style={{ ...btn(T), cursor: 'pointer' }}>
-              Upload
-              <input
-                type="file"
-                accept="image/*"
-                style={{ display: 'none' }}
-                onChange={e => {
-                  const file = e.target.files?.[0]
-                  if (file) loadFromSrc(URL.createObjectURL(file))
-                  e.target.value = ''
-                }}
-              />
-            </label>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {imageData && <button onClick={clearImage} style={btn(T)}>Clear</button>}
+              <label style={{ ...btn(T), cursor: 'pointer' }}>
+                Upload
+                <input
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={e => {
+                    const file = e.target.files?.[0]
+                    if (file) loadFromSrc(URL.createObjectURL(file))
+                    e.target.value = ''
+                  }}
+                />
+              </label>
+            </div>
           </div>
           <div
             style={{
@@ -545,6 +583,7 @@ export default function App() {
               border: `1px solid ${dragging ? T.accent : T.border}`,
               transition: 'border-color 0.15s', cursor: 'pointer',
               width: CANVAS_SIZE, height: CANVAS_SIZE,
+              background: T.panel,
             }}
             onDrop={handleDrop}
             onDragOver={e => { e.preventDefault(); setDragging(true) }}
@@ -721,16 +760,22 @@ export default function App() {
         }}>
           {/* Header */}
           <div style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
             padding: '6px 10px', borderBottom: `1px solid ${T.border}`,
             background: T.panel, flexShrink: 0,
           }}>
-            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>TOPOLOGY</span>
-            <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden' }}>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em', paddingTop: '4px' }}>TOPOLOGY</span>
+            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden', maxWidth: '80%' }}>
               {([
-                ['rectangular', 'Rectangular'], ['cylindrical', 'Cylindrical'],
-                ['toroidal', 'Toroidal'], ['spherical', 'Spherical'],
-                ['projective', 'Projective'], ['mobius', 'Möbius'], ['klein', 'Klein'],
+                ['cone', 'Triangle'],
+                ['bicone', 'Bigon'],
+                ['rectangular', 'Rectangle'],
+                ['cylindrical', 'Cylinder'], 
+                ['mobius', 'Möbius'],
+                ['klein', 'Klein'],
+                ['toroidal', 'Torus'], 
+                ['spherical', 'Sphere'], 
+                ['projective', 'Projective'],
               ] as const).map(([value, label]) => {
                 const active = params.topology === value
                 return (

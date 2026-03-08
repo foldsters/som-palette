@@ -21,7 +21,7 @@ uniform vec2 u_bmu;       // BMU grid position in GPU coords (y=0 at bottom)
 uniform vec3 u_color;     // sampled pixel RGB [0,1]
 uniform float u_blend;
 uniform float u_radius;   // neighbourhood radius in grid cells
-uniform int u_topology;  // 0=rectangular 1=cylindrical 2=toroidal 3=spherical 4=hexagonal 5=projective 6=mobius 7=klein
+uniform int u_topology;  // 0=rectangular 1=cylindrical 2=toroidal 3=spherical 4=hexagonal 5=projective 6=mobius 7=klein 8=cone 9=bicone
 uniform bool u_gaussian;
 
 #define PI 3.14159265358979
@@ -60,6 +60,17 @@ void main() {
     float dx = (gridPos.x + ox) - u_bmu.x;
     float dy = (gridPos.y - u_bmu.y) * 0.8660254; // sqrt(3)/2
     d = length(vec2(dx, dy));
+  } else if (u_topology == 8) {
+    // Cone: CPU bottom row (GPU y=0) is a point — distance can route through it
+    float d_direct = length(gridPos - u_bmu);
+    float d_pole   = gridPos.y + u_bmu.y;   // distance to GPU bottom (=CPU bottom) and back
+    d = min(d_direct, d_pole);
+  } else if (u_topology == 9) {
+    // Bicone: CPU top (GPU y=rows-1) and CPU bottom (GPU y=0) are both points
+    float d_direct = length(gridPos - u_bmu);
+    float d_bottom = gridPos.y + u_bmu.y;
+    float d_top    = (u_size.y - 1.0 - gridPos.y) + (u_size.y - 1.0 - u_bmu.y);
+    d = min(d_direct, min(d_bottom, d_top));
   } else if (u_topology == 6) {
     // Möbius band: horizontal wraps with row flip, vertical is open
     float flipRow = u_size.y - 1.0 - u_bmu.y;
@@ -263,7 +274,7 @@ export class GLSOM {
     totalIter: number,
     blendDecay: number,
     radiusDecay: number,
-    topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein',
+    topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone',
     gaussian: boolean,
   ): void {
     const { rows, cols } = this
@@ -329,7 +340,9 @@ export class GLSOM {
         topology === 'hexagonal'    ? 4 :
         topology === 'projective'   ? 5 :
         topology === 'mobius'       ? 6 :
-        topology === 'klein'        ? 7 : 3)
+        topology === 'klein'        ? 7 :
+        topology === 'cone'         ? 8 :
+        topology === 'bicone'       ? 9 : 3)
       gl.uniform1i(this.uGaussian, gaussian ? 1 : 0)
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)

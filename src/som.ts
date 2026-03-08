@@ -29,7 +29,7 @@ export function runSOMBatch(
   totalIter: number,
   blendDecay: number,
   radiusDecay: number,
-  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein',
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone',
   gaussian: boolean,
 ): void {
   const diagonal = topology === 'projective' ? Math.PI / 2 : topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
@@ -91,6 +91,17 @@ export function runSOMBatch(
           const dx = (col + (row % 2) * 0.5) - (bmuCol + (bmuRow % 2) * 0.5)
           const dy = (row - bmuRow) * HEX_DY
           dist = Math.sqrt(dx * dx + dy * dy)
+        } else if (topology === 'cone') {
+          // Bottom row is a single point — distance can route through it
+          const direct = Math.sqrt((row - bmuRow) ** 2 + (col - bmuCol) ** 2)
+          const throughBottom = (rows - 1 - row) + (rows - 1 - bmuRow)
+          dist = Math.min(direct, throughBottom)
+        } else if (topology === 'bicone') {
+          // Top and bottom rows are each a single point
+          const direct = Math.sqrt((row - bmuRow) ** 2 + (col - bmuCol) ** 2)
+          const throughBottom = (rows - 1 - row) + (rows - 1 - bmuRow)
+          const throughTop = row + bmuRow
+          dist = Math.min(direct, throughBottom, throughTop)
         } else if (topology === 'mobius') {
           // Möbius band: horizontal wraps with row flip, vertical is open
           const dx = col - bmuCol, dy = row - bmuRow

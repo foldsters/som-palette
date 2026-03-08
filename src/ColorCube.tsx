@@ -144,6 +144,52 @@ function makeKleinGeometry(): THREE.BufferGeometry {
   return geo
 }
 
+function makeConeGeometry(): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([
+    -0.42,  0.35, 0,  // top-left  (palette top)
+     0.42,  0.35, 0,  // top-right (palette top)
+     0.0,  -0.35, 0,  // apex      (palette bottom = point)
+  ], 3))
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute([
+    0, 1,    // top-left:  palette top row  (v=1 with flipY)
+    1, 1,    // top-right: palette top row
+    0.5, 0,  // apex:      palette bottom row (v=0 with flipY)
+  ], 2))
+  geo.setIndex([0, 2, 1])
+  geo.computeVertexNormals()
+  return geo
+}
+
+function makeBigonGeometry(): THREE.BufferGeometry {
+  // Lens shape: two pole vertices connected by arced sides (like a 2-gon / vesica).
+  // Width is zero at the poles and maximal at the equator.
+  const NV = 48, NH = 32, H = 0.42, W = 0.30
+  const positions: number[] = [], uvs: number[] = [], indices: number[] = []
+  for (let i = 0; i <= NV; i++) {
+    const tv = i / NV
+    const y = H * (1 - 2 * tv)
+    const w = W * Math.sin(Math.PI * tv)
+    for (let j = 0; j <= NH; j++) {
+      const th = j / NH
+      positions.push((th - 0.5) * 2 * w, y, 0)
+      uvs.push(th, 1 - tv)  // v=1 = palette top, v=0 = palette bottom (flipY)
+    }
+  }
+  for (let i = 0; i < NV; i++) {
+    for (let j = 0; j < NH; j++) {
+      const a = i * (NH + 1) + j
+      indices.push(a, a + NH + 1, a + 1, a + 1, a + NH + 1, a + NH + 2)
+    }
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  geo.setIndex(indices)
+  geo.computeVertexNormals()
+  return geo
+}
+
 // ─── Frame geometry — computed once outside components so refs are stable ─────
 
 const CUBE_EDGES: [[number,number,number],[number,number,number]][] = [
@@ -297,12 +343,18 @@ function applyTopologyGeometry(mesh: THREE.Mesh, topology: string, rows: number,
     const h = aspect >= 1 ? 0.7 / aspect : 0.7
     mesh.geometry = new THREE.PlaneGeometry(w, h)
     mat.side = THREE.DoubleSide
+  } else if (topology === 'cone') {
+    mesh.geometry = makeConeGeometry()
+    mat.side = THREE.DoubleSide
+  } else if (topology === 'bicone') {
+    mesh.geometry = makeBigonGeometry()
+    mat.side = THREE.DoubleSide
   } else if (topology === 'mobius') {
     mesh.geometry = makeMobiusGeometry()
     mat.side = THREE.DoubleSide
   } else if (topology === 'klein') {
     mesh.geometry = makeKleinGeometry()
-    mat.side = THREE.DoubleSide
+    mat.side = THREE.FrontSide   // FrontSide reduces z-fighting at the self-intersection
   } else {
     mesh.geometry = new THREE.TorusGeometry(0.35, 0.2, 64, 128)
     mat.side = THREE.FrontSide
@@ -367,7 +419,7 @@ export function TopologyScene({ paletteCanvasRef, lightModeRef, topologyRef, pal
       lastDimensions.current = { rows, cols }
       applyTopologyGeometry(mesh, topology, rows, cols)
       if (textureRef.current) {
-        textureRef.current.wrapS = (topology === 'rectangular' || topology === 'hexagonal' || topology === 'mobius') ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping
+        textureRef.current.wrapS = (topology === 'toroidal' || topology === 'cylindrical' || topology === 'spherical' || topology === 'projective' || topology === 'klein') ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
         textureRef.current.wrapT = (topology === 'toroidal' || topology === 'klein') ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
         textureRef.current.needsUpdate = true
       }
@@ -380,7 +432,7 @@ export function TopologyScene({ paletteCanvasRef, lightModeRef, topologyRef, pal
         textureRef.current?.dispose()
         const tex = new THREE.CanvasTexture(canvas)
         tex.colorSpace = THREE.SRGBColorSpace
-        tex.wrapS = (topology === 'rectangular' || topology === 'hexagonal' || topology === 'mobius') ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping
+        tex.wrapS = (topology === 'toroidal' || topology === 'cylindrical' || topology === 'spherical' || topology === 'projective' || topology === 'klein') ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
         tex.wrapT = (topology === 'toroidal' || topology === 'klein') ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
         textureRef.current = tex
         lastSize.current = { w: canvas.width, h: canvas.height }
