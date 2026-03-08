@@ -31,6 +31,8 @@ export function runSOMBatch(
   radiusDecay: number,
   topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone',
   gaussian: boolean,
+  maskRGB: [number, number, number] | null = null,
+  maskTolSq: number = 0,
 ): void {
   const diagonal = topology === 'projective' ? Math.PI / 2 : topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
   // mobius and klein use same Euclidean diagonal as rectangular/toroidal
@@ -45,12 +47,17 @@ export function runSOMBatch(
     const blend    = SCHED_START + (SCHED_END - SCHED_START) * tBlend
     const radius   = (SCHED_START + (SCHED_END - SCHED_START) * tRadius) * diagonal
 
-    // Sample random pixel
-    const pi = Math.floor(Math.random() * totalPixels) * 4
-    const rr = imageData.data[pi]     / 255
-    const rg = imageData.data[pi + 1] / 255
-    const rb = imageData.data[pi + 2] / 255
-    const [pr, pg, pb] = [rr, rg, rb]
+    // Sample random pixel, skipping masked colors (up to 20 attempts)
+    let pr = 0, pg = 0, pb = 0
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const pi = Math.floor(Math.random() * totalPixels) * 4
+      pr = imageData.data[pi]     / 255
+      pg = imageData.data[pi + 1] / 255
+      pb = imageData.data[pi + 2] / 255
+      if (!maskRGB) break
+      const dr = pr - maskRGB[0], dg = pg - maskRGB[1], db = pb - maskRGB[2]
+      if (dr * dr + dg * dg + db * db > maskTolSq) break
+    }
 
     // Find BMU (closest palette cell in RGB space)
     let minDist = Infinity

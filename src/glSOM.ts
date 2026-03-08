@@ -179,9 +179,11 @@ export class GLSOM {
   private rows = 0
   private cols = 0
   private readBuf: Float32Array = new Float32Array(0)  // RGBA readback scratch
+  private pbo: WebGLBuffer | null = null               // async pixel pack buffer
+  private pboFilled = false                            // true when PBO holds unread data
 
   // CPU mirror of palette in top-to-bottom row order (matches 2D canvas rendering).
-  // Updated from GPU at the end of every runBatch call.
+  // Updated from GPU at the start of each runBatch (one batch latency — fine for SOM).
   readonly mirror: Float32Array[] = []   // re-assigned on init
   cpuMirror: Float32Array = new Float32Array(0)
 
@@ -233,6 +235,7 @@ export class GLSOM {
     this.cols = cols
     this.cpuMirror = new Float32Array(rows * cols * 3)
     this.readBuf   = new Float32Array(rows * cols * 4)
+    this.pboFilled = false
 
     const zeros = new Float32Array(rows * cols * 4)
     for (let i = 0; i < 2; i++) {
@@ -240,6 +243,13 @@ export class GLSOM {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, cols, rows, 0, gl.RGBA, gl.FLOAT, zeros)
     }
     gl.bindTexture(gl.TEXTURE_2D, null)
+
+    // (Re)allocate PBO sized for the palette readback
+    if (!this.pbo) this.pbo = gl.createBuffer()!
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo)
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, rows * cols * 4 * 4, gl.STREAM_READ)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+
     this.current = 0
   }
 
@@ -262,10 +272,37 @@ export class GLSOM {
     this.current = 0
   }
 
+  /** Copy the pending PBO readback into cpuMirror (blocks if GPU isn't done yet). */
+  private syncPBO(): void {
+    const gl = this.gl
+    const { rows, cols } = this
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo!)
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, this.readBuf)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+    this.pboFilled = false
+    const mirror = this.cpuMirror
+    for (let row = 0; row < rows; row++) {
+      const gpuRow = rows - 1 - row
+      for (let col = 0; col < cols; col++) {
+        const src = (gpuRow * cols + col) * 4
+        const dst = (row    * cols + col) * 3
+        mirror[dst]     = this.readBuf[src]
+        mirror[dst + 1] = this.readBuf[src + 1]
+        mirror[dst + 2] = this.readBuf[src + 2]
+      }
+    }
+  }
+
+  /** Flush any pending async readback — call after the final batch. */
+  flush(): void {
+    if (this.pboFilled) this.syncPBO()
+  }
+
   /**
    * Run fromIter..toIter SOM iterations on the GPU.
-   * CPU mirror is used for BMU search (stale by up to one batch — fine for SOM).
-   * Mirror is synced from GPU at the end of each call.
+   * CPU mirror is used for BMU search (stale by one batch — fine for SOM).
+   * Readback is async via PBO: previous batch's result is synced at the start,
+   * and this batch's result is issued at the end for the next batch to pick up.
    */
   runBatch(
     imageData: ImageData,
@@ -276,6 +313,8 @@ export class GLSOM {
     radiusDecay: number,
     topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone',
     gaussian: boolean,
+    maskRGB: [number, number, number] | null = null,
+    maskTolSq: number = 0,
   ): void {
     const { rows, cols } = this
     const diagonal = topology === 'projective' ? Math.PI / 2 : topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
@@ -284,6 +323,9 @@ export class GLSOM {
     const mirror      = this.cpuMirror
     const blendExp    = Math.pow(10, 2 * blendDecay - 1)
     const radiusExp   = Math.pow(10, 2 * radiusDecay - 1)
+
+    // Sync the previous batch's async readback before using cpuMirror for BMU search
+    if (this.pboFilled) this.syncPBO()
 
     gl.useProgram(this.prog)
     gl.bindVertexArray(this.vao)
@@ -297,12 +339,17 @@ export class GLSOM {
       const blend    = 1.0 + (0.01 - 1.0) * tBlend
       const radius   = (1.0 + (0.01 - 1.0) * tRadius) * diagonal
 
-      // Sample random pixel from image
-      const pi = Math.floor(Math.random() * totalPixels) * 4
-      const rr = imageData.data[pi]     / 255
-      const rg = imageData.data[pi + 1] / 255
-      const rb = imageData.data[pi + 2] / 255
-      const [r, g, b] = [rr, rg, rb]
+      // Sample random pixel, skipping masked colors (up to 20 attempts)
+      let r = 0, g = 0, b = 0
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const pi = Math.floor(Math.random() * totalPixels) * 4
+        r = imageData.data[pi]     / 255
+        g = imageData.data[pi + 1] / 255
+        b = imageData.data[pi + 2] / 255
+        if (!maskRGB) break
+        const dr = r - maskRGB[0], dg = g - maskRGB[1], db = b - maskRGB[2]
+        if (dr * dr + dg * dg + db * db > maskTolSq) break
+      }
 
       // BMU search on CPU mirror (top-to-bottom row order)
       let minDist = Infinity, bmuCol = 0, bmuRow = 0
@@ -349,21 +396,13 @@ export class GLSOM {
       this.current = dst
     }
 
-    // Sync CPU mirror from GPU (readPixels returns bottom-to-top)
+    // Issue async readback into PBO — GPU writes DMA, no CPU stall
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbos[this.current])
-    gl.readPixels(0, 0, cols, rows, gl.RGBA, gl.FLOAT, this.readBuf)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo!)
+    gl.readPixels(0, 0, cols, rows, gl.RGBA, gl.FLOAT, 0)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
-
-    for (let row = 0; row < rows; row++) {
-      const gpuRow = rows - 1 - row   // flip: GPU bottom-row → CPU top-row
-      for (let col = 0; col < cols; col++) {
-        const src = (gpuRow * cols + col) * 4
-        const dst = (row    * cols + col) * 3
-        mirror[dst]     = this.readBuf[src]
-        mirror[dst + 1] = this.readBuf[src + 1]
-        mirror[dst + 2] = this.readBuf[src + 2]
-      }
-    }
+    this.pboFilled = true
 
     gl.bindVertexArray(null)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -375,5 +414,6 @@ export class GLSOM {
     gl.deleteVertexArray(this.vao)
     this.textures.forEach(t => gl.deleteTexture(t))
     this.fbos.forEach(f => gl.deleteFramebuffer(f))
+    if (this.pbo) gl.deleteBuffer(this.pbo)
   }
 }

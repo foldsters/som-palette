@@ -84,6 +84,57 @@ function PaletteCloud({ palette, rows, cols, vizSpace, compress, lightMode }: { 
   )
 }
 
+type Topology = 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone'
+
+function PaletteGrid({ palette, rows, cols, vizSpace, compress, lightMode, topology }: { palette: Float32Array; rows: number; cols: number; vizSpace: VizSpace; compress: boolean; lightMode: boolean; topology: Topology }) {
+  const { positions, colors } = useMemo(() => {
+    const pos: number[] = [], col: number[] = []
+    function push(i: number, j: number) {
+      for (const idx of [i, j]) {
+        const r = palette[idx * 3], g = palette[idx * 3 + 1], b = palette[idx * 3 + 2]
+        const [x, y, z] = convertVizCoords(r, g, b, vizSpace)
+        pos.push(x, y, z)
+        const cr = compress ? (lightMode ? r * 0.5 : r * 0.5 + 0.5) : r
+        const cg = compress ? (lightMode ? g * 0.5 : g * 0.5 + 0.5) : g
+        const cb = compress ? (lightMode ? b * 0.5 : b * 0.5 + 0.5) : b
+        col.push(linearize(cr), linearize(cg), linearize(cb))
+      }
+    }
+    // Interior edges
+    for (let row = 0; row < rows; row++) {
+      for (let c = 0; c < cols; c++) {
+        if (c + 1 < cols) push(row * cols + c, row * cols + c + 1)
+        if (row + 1 < rows) push(row * cols + c, (row + 1) * cols + c)
+      }
+    }
+    // Wrap edges by topology
+    if (topology === 'cylindrical' || topology === 'toroidal' || topology === 'spherical' || topology === 'projective') {
+      for (let row = 0; row < rows; row++)
+        push(row * cols + (cols - 1), row * cols)
+    }
+    if (topology === 'mobius' || topology === 'klein') {
+      for (let row = 0; row < rows; row++)
+        push(row * cols + (cols - 1), (rows - 1 - row) * cols)
+    }
+    if (topology === 'toroidal' || topology === 'klein') {
+      for (let c = 0; c < cols; c++)
+        push((rows - 1) * cols + c, c)
+    }
+    return { positions: new Float32Array(pos), colors: new Float32Array(col) }
+  }, [palette, rows, cols, vizSpace, compress, lightMode, topology])
+
+  if (positions.length === 0) return null
+  return (
+    <lineSegments>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+        <bufferAttribute attach="attributes-color" args={[colors, 3]} />
+      </bufferGeometry>
+      <lineBasicMaterial vertexColors transparent opacity={0.5} />
+    </lineSegments>
+  )
+}
+
 // ─── Topology mesh geometry builders ─────────────────────────────────────────
 
 function makeMobiusGeometry(): THREE.BufferGeometry {
@@ -256,9 +307,10 @@ export interface ColorCubeProps {
   vizSpace: VizSpace
   lightMode: boolean
   compress: boolean
+  topology: Topology
 }
 
-export default function ColorCube({ imageData, palette, rows, cols, vizSpace, lightMode, compress }: ColorCubeProps) {
+export default function ColorCube({ imageData, palette, rows, cols, vizSpace, lightMode, compress, topology }: ColorCubeProps) {
   const pivotRef = useRef<THREE.Group>(null)
   const controlsRef = useRef<OrbitControlsImpl>(null)
   const interacted = useRef(false)
@@ -292,6 +344,7 @@ export default function ColorCube({ imageData, palette, rows, cols, vizSpace, li
             ? <CylinderFrame vizSpace={vizSpace} lightMode={lightMode} />
             : <CubeFrame vizSpace={vizSpace} lightMode={lightMode} />}
           {imageData && <ImageCloud imageData={imageData} vizSpace={vizSpace} compress={compress} lightMode={lightMode} />}
+          {palette && <PaletteGrid palette={palette} rows={rows} cols={cols} vizSpace={vizSpace} compress={compress} lightMode={lightMode} topology={topology} />}
           {palette && <PaletteCloud palette={palette} rows={rows} cols={cols} vizSpace={vizSpace} compress={compress} lightMode={lightMode} />}
         </group>
       </group>
@@ -354,7 +407,7 @@ function applyTopologyGeometry(mesh: THREE.Mesh, topology: string, rows: number,
     mat.side = THREE.DoubleSide
   } else if (topology === 'klein') {
     mesh.geometry = makeKleinGeometry()
-    mat.side = THREE.FrontSide   // FrontSide reduces z-fighting at the self-intersection
+    mat.side = THREE.DoubleSide
   } else {
     mesh.geometry = new THREE.TorusGeometry(0.35, 0.2, 64, 128)
     mat.side = THREE.FrontSide

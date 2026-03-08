@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Canvas } from '@react-three/fiber'
 import ColorCube, { TopologyScene } from './ColorCube'
-import { runSOMBatch, renderPalette, smoothPaletteCanvas } from './som'
+import { runSOMBatch, renderPalette } from './som'
 import { GLSOM } from './glSOM'
 import { type VizSpace, VIZ_AXES } from './colorSpaces'
 
@@ -71,6 +71,8 @@ interface Params {
   topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone'
   gaussian: boolean
   randomInit: boolean
+  maskColor: string | null
+  maskTolerance: number
 }
 
 const DEFAULT_PARAMS: Params = {
@@ -82,6 +84,8 @@ const DEFAULT_PARAMS: Params = {
   topology: 'toroidal',
   gaussian: true,
   randomInit: true,
+  maskColor: null,
+  maskTolerance: 0.15,
 }
 
 // ─── Slider ──────────────────────────────────────────────────────────────────
@@ -134,6 +138,7 @@ export default function App() {
   const [vizSpace, setVizSpace]       = useState<VizSpace>('rgb')
   const [lightMode, setLightMode]     = useState(false)
   const [compress, setCompress]       = useState(false)
+  const [showInfo, setShowInfo]       = useState(false)
 
   const T = lightMode ? LIGHT : DARK
 
@@ -154,6 +159,12 @@ export default function App() {
   const paletteReadyRef = useRef(false)
   const rowsRef         = useRef(params.rows)
   const colsRef         = useRef(params.cols)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowInfo(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   useEffect(() => { lightModeRef.current = lightMode },      [lightMode])
   useEffect(() => { topologyRef.current = params.topology }, [params.topology])
   useEffect(() => { rowsRef.current = params.rows },         [params.rows])
@@ -200,19 +211,13 @@ export default function App() {
       if (!canvas) return
       const ctx = canvas.getContext('2d')
       if (!ctx) return
-      // Fit (contain) — scale to fill canvas without cropping
-      const scale = Math.min(CANVAS_SIZE / img.width, CANVAS_SIZE / img.height)
-      const w = Math.round(img.width * scale)
-      const h = Math.round(img.height * scale)
-      const x = Math.round((CANVAS_SIZE - w) / 2)
-      const y = Math.round((CANVAS_SIZE - h) / 2)
+      // Stretch to fill the full square canvas
       ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
-      ctx.drawImage(img, x, y, w, h)
+      ctx.drawImage(img, 0, 0, CANVAS_SIZE, CANVAS_SIZE)
       if (saveToCache) {
         try { localStorage.setItem('som_image', canvas.toDataURL('image/jpeg', 0.85)) } catch {}
       }
-      // Sample only the image region (not blank letterbox areas)
-      const data = ctx.getImageData(x, y, w, h)
+      const data = ctx.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE)
       setImageData(data)
       // Reset palette
       if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; setRunning(false) }
@@ -290,12 +295,19 @@ export default function App() {
       const p = paramsRef.current
       const from = iterRef.current
       const to   = Math.min(from + batchSize, totalIterRef.current)
+      const maskRGB = p.maskColor ? [
+        parseInt(p.maskColor.slice(1, 3), 16) / 255,
+        parseInt(p.maskColor.slice(3, 5), 16) / 255,
+        parseInt(p.maskColor.slice(5, 7), 16) / 255,
+      ] as [number, number, number] : null
+      const maskTolSq = p.maskTolerance * p.maskTolerance
 
       if (glsom) {
         glsom.runBatch(
           data as ImageData,
           from, to, totalIterRef.current,
           p.blendDecay, p.radiusDecay, p.topology, p.gaussian,
+          maskRGB, maskTolSq,
         )
       } else {
         runSOMBatch(
@@ -303,6 +315,7 @@ export default function App() {
           p.rows, p.cols,
           from, to, totalIterRef.current,
           p.blendDecay, p.radiusDecay, p.topology, p.gaussian,
+          maskRGB, maskTolSq,
         )
       }
 
@@ -318,6 +331,7 @@ export default function App() {
       if (to < totalIterRef.current) {
         animRef.current = requestAnimationFrame(tick)
       } else {
+        glomRef.current?.flush()
         animRef.current = null
         setRunning(false)
         setPaletteCopy(new Float32Array(paletteRef.current))
@@ -333,7 +347,7 @@ export default function App() {
     if (!autoRun || !imageData) return
     startTraining()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.rows, params.cols, params.topology, params.gaussian, params.randomInit, imageData, autoRun])
+  }, [params.rows, params.cols, params.topology, params.gaussian, params.randomInit, params.maskColor, imageData, autoRun])
 
   const triggerAutoRun = useCallback(() => {
     if (autoRun && imageData) startTraining()
@@ -341,14 +355,7 @@ export default function App() {
 
   // ─── Actions ───────────────────────────────────────────────────────────────
 
-  const handleSmooth = useCallback(() => {
-    const canvas = paletteCanvasRef.current
-    if (!canvas) return
-    const p = paramsRef.current
-    smoothPaletteCanvas(canvas, paletteRef.current, p.rows, p.cols, p.topology === 'toroidal')
-  }, [])
-
-  const handleExportPNG = useCallback(() => {
+const handleExportPNG = useCallback(() => {
     const canvas = paletteCanvasRef.current
     if (!canvas) return
     const link = document.createElement('a')
@@ -428,14 +435,111 @@ export default function App() {
             Self-Organizing Map · drop an image to begin
           </p>
         </div>
-        <button
-          onClick={() => setLightMode(m => !m)}
-          style={{ ...btn(T), padding: '5px 12px', marginTop: '2px' }}
-          title="Toggle light / dark"
-        >
-          {lightMode ? '◑ dark' : '◐ light'}
-        </button>
+        <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
+          <button onClick={() => setShowInfo(true)} style={{ ...btn(T), padding: '5px 12px' }}>?</button>
+          <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px' }} title="Toggle light / dark">
+            {lightMode ? '◑ dark' : '◐ light'}
+          </button>
+        </div>
       </div>
+
+      {/* Info modal */}
+      {showInfo && (
+        <div
+          onClick={() => setShowInfo(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 100,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '24px',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: T.panel, border: `1px solid ${T.border}`,
+              borderRadius: '12px', padding: '28px 32px',
+              maxWidth: '900px', width: '100%', maxHeight: '80vh',
+              overflowY: 'auto', color: T.text, fontSize: '13px', lineHeight: '1.6',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
+              <h2 style={{ color: T.accent, fontSize: '15px', fontWeight: 'normal', letterSpacing: '0.1em' }}>
+                SOM PALETTE EXTRACTOR
+              </h2>
+              <button onClick={() => setShowInfo(false)} style={{ ...btn(T), padding: '3px 10px', fontSize: '14px' }}>✕</button>
+            </div>
+
+            <p style={{ color: T.muted, marginBottom: '14px' }}>
+              A <strong style={{ color: T.text }}>Self-Organizing Map (SOM)</strong> is an unsupervised neural network
+              that performs non-linear dimensionality reduction while preserving the topological structure of its input.
+              A grid of nodes — each holding a weight vector in the input space — is trained by repeatedly
+              presenting random samples: the closest node (the Best Matching Unit) and its neighbours are nudged
+              toward each sample, with influence decaying over both distance and time.
+              The result is a low-dimensional map where proximity reflects similarity in the original high-dimensional space.
+            </p>
+            <p style={{ color: T.muted, marginBottom: '20px' }}>
+              Here, each node holds an RGB triplet and the input space is the set of pixel colors in an image.
+              Training causes the grid to fold and stretch through color space until it densely covers
+              the image's color distribution — brighter regions of the palette correspond to more frequently
+              sampled hues. The choice of topology controls how the grid's edges connect,
+              letting you extract palettes shaped as toruses, spheres, Möbius bands, and more,
+              each producing a different kind of color continuity across the grid.
+            </p>
+
+            {[
+              ['BASIC USAGE', [
+                ['Drop or upload an image', 'Drag onto the source canvas, or use the Upload button.'],
+                ['Set grid size', 'Rows × Cols controls how many palette colors are generated.'],
+                ['Choose a topology', 'Determines how the grid edges connect (see below).'],
+                ['Draw', 'Runs the SOM. Enable Auto to re-run whenever a setting changes.'],
+                ['Copy colors', 'Click any cell in the palette to copy its hex value to the clipboard.'],
+                ['Export', 'Save the palette as a PNG image or a GIMP-compatible .gpl file.'],
+              ]],
+              ['PARAMETERS', [
+                ['Iterations', 'Number of random pixel samples used to train the palette. More = higher quality, slower.'],
+                ['Blend Decay', 'How quickly the learning rate falls off. 0.5 = linear; lower = fast early drop; higher = slow early drop.'],
+                ['Radius Decay', 'Same curve applied to the neighbourhood radius — how far each update spreads from the winning cell.'],
+                ['Kernel', 'Hard: flat neighbourhood update — all cells within the radius update equally.\nGaussian: smooth falloff — influence decreases toward the radius boundary.'],
+                ['Init', 'Zero: all cells start as black.\nRandom: cells are seeded with random pixels sampled from the image.'],
+                ['Ignore Color', 'Pixels within tolerance of this color are skipped during sampling — useful for solid backgrounds or transparency.'],
+              ]],
+              ['TOPOLOGIES', [
+                ['Triangle', 'Bottom row collapses to a single point, like a slice through HSV color space.\nGood for palettes anchored to a single dark or neutral tone.'],
+                ['Bigon', 'Both top and bottom rows collapse to points, like a slice through HSL color space.\nGood for palettes with distinct dark and light poles and varied hues in between.'],
+                ['Rectangle', 'Open grid with no edge connections.\nGeneral-purpose flat palette or swatch grid.'],
+                ['Cylinder', 'Left and right edges connect, forming a tube.\nGood for palettes that cycle continuously through hue with no seam.'],
+                ['Möbius', 'Left and right edges connect with a half-twist — the surface has only one side.\nGood for palettes where opposite ends of the hue range blend into each other.'],
+                ['Klein', 'All edges connect; horizontal edges join with a half-twist. Non-orientable closed surface.\nGood for highly continuous color relationships with no privileged boundary.'],
+                ['Torus', 'All edges connect, wrapping in both directions.\nGood for seamlessly tileable texture palettes — both axes loop continuously.'],
+                ['Sphere', 'Full spherical surface mapped from the grid.\nGood for normal map palettes, where the layout aligns with the distribution of surface normals.'],
+                ['Projective', 'Sphere with antipodal identification — opposite points are treated as the same.\nGood for palettes where complementary colors should share the same region.'],
+              ]],
+              ['COLOR SPACE VIEWER', [
+                ['What it shows', 'Image pixels appear as a point cloud; palette cells appear as larger dots connected by grid lines showing the SOM\'s topology. Lets you see how well the trained palette covers the image\'s color distribution.'],
+                ['RGB', 'Linear RGB cube. Axes are red, green, and blue. Best for seeing raw color spread across the full gamut.'],
+                ['OKLab', 'Perceptually uniform space. L = lightness, a = green↔red, b = blue↔yellow. Distances reflect perceived color difference, so clusters here are perceptually meaningful.'],
+                ['OKLCh', 'Cylindrical form of OKLab. Height = lightness, radius = chroma, angle = hue. Good for seeing how saturated and how varied in hue the palette is.'],
+                ['HSV', 'Hue-Saturation-Value cylinder. Height = value, radius = saturation, angle = hue. Desaturated colors cluster on the central axis; dark colors at the bottom.'],
+                ['HSL', 'Hue-Saturation-Lightness double cone. Height = lightness, radius = saturation, angle = hue. Both dark and light colors converge on the axis.'],
+              ]],
+            ].map(([heading, rows]) => (
+              <div key={heading as string} style={{ marginBottom: '20px' }}>
+                <div style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em', marginBottom: '10px' }}>
+                  {heading as string}
+                </div>
+                {(rows as [string, string][]).map(([term, desc]) => (
+                  <div key={term} style={{ display: 'flex', gap: '12px', marginBottom: '7px' }}>
+                    <span style={{ color: T.accent, minWidth: '170px', flexShrink: 0, fontSize: '12px' }}>{term}</span>
+                    <span style={{ color: T.muted, whiteSpace: 'pre-line' }}>{desc}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Settings pane */}
       <div style={{ background: T.panel, borderRadius: '10px', border: `1px solid ${T.border}`, transition: 'background 0.2s' }}>
@@ -494,11 +598,11 @@ export default function App() {
             </div>
 
             {/* Toggles row */}
-            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
 
               {/* Mask toggle */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>MASK</span>
+                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>KERNEL</span>
                 <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '6px', overflow: 'hidden' }}>
                   {(['Hard', 'Gaussian'] as const).map(mode => {
                     const active = (mode === 'Gaussian') === params.gaussian
@@ -545,6 +649,37 @@ export default function App() {
                       </button>
                     )
                   })}
+                </div>
+              </div>
+
+              {/* Ignore color */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>IGNORE COLOR</span>
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <label style={{ position: 'relative', cursor: 'pointer', flexShrink: 0 }}>
+                    <div style={{
+                      width: '32px', height: '32px', borderRadius: '6px',
+                      border: `1px solid ${params.maskColor ? T.accent : T.border}`,
+                      background: params.maskColor ?? `repeating-conic-gradient(${T.border} 0% 25%, transparent 0% 50%) 0 0 / 8px 8px`,
+                    }} />
+                    <input
+                      type="color"
+                      value={params.maskColor ?? '#ffffff'}
+                      style={{ position: 'absolute', opacity: 0, inset: 0, width: '100%', height: '100%', cursor: 'pointer' }}
+                      onChange={e => setParam('maskColor', e.target.value)}
+                    />
+                  </label>
+                  {params.maskColor && (
+                    <button onClick={() => setParam('maskColor', null)} style={{ ...btn(T), padding: '5px 10px' }}>Clear</button>
+                  )}
+                  {params.maskColor && (
+                    <div style={{ width: '120px' }}>
+                      <Slider label="Tolerance" value={params.maskTolerance} min={0} max={0.5} step={0.005}
+                        display={`${(params.maskTolerance * 100).toFixed(0)}%`}
+                        muted={T.muted} text={T.text}
+                        onChange={v => setParam('maskTolerance', v)} onRelease={triggerAutoRun} />
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -608,8 +743,7 @@ export default function App() {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
             <div style={{ display: 'flex', gap: '6px' }}>
-              <button onClick={handleSmooth} disabled={running} style={btn(T)}>Smooth</button>
-              <button onClick={handleExportPNG} disabled={running} style={btn(T)}>Export PNG</button>
+<button onClick={handleExportPNG} disabled={running} style={btn(T)}>Export PNG</button>
               <button onClick={handleExportGPL} disabled={running} style={btn(T)}>Export GPL</button>
             </div>
           </div>
@@ -747,6 +881,7 @@ export default function App() {
               vizSpace={vizSpace}
               lightMode={lightMode}
               compress={compress}
+              topology={params.topology}
             />
           </Canvas>
         </div>
