@@ -120,7 +120,7 @@ export default function ColorCube({ imageData, palette, rows, cols }: ColorCubeP
 // ─── Topology scene (sphere / torus) ─────────────────────────────────────────
 
 export interface TopologySceneProps {
-  topology: 'sphere' | 'tileable'
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical'
   paletteCanvasRef: React.RefObject<HTMLCanvasElement>
 }
 
@@ -154,7 +154,8 @@ export function TopologyScene({ topology, paletteCanvasRef }: TopologySceneProps
         const tex = new THREE.CanvasTexture(canvas)
         // Longitude wraps; latitude does not (sphere) but torus wraps both
         tex.wrapS = THREE.RepeatWrapping
-        tex.wrapT = topology === 'tileable' ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
+        tex.wrapT = topology === 'toroidal' ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping
+        // cylinder: open-ended, so no top/bottom cap seam issues
         textureRef.current = tex
         lastSize.current = { w: canvas.width, h: canvas.height }
         setTexture(tex)
@@ -173,10 +174,25 @@ export function TopologyScene({ topology, paletteCanvasRef }: TopologySceneProps
       <OrbitControls ref={controlsRef} enablePan={false} enableZoom enableRotate makeDefault
         onStart={() => { interacted.current = true }} />
       {texture && (
-        topology === 'sphere' ? (
+        topology === 'spherical' ? (
           <mesh ref={meshRef}>
-            <sphereGeometry args={[0.5, 64, 32]} />
+            <sphereGeometry args={[0.5, 64, 32]} ref={(geo: THREE.SphereGeometry | null) => {
+              if (!geo) return
+              // All vertices in the north and south pole rings share one 3D point but
+              // span U=0..1 by default, causing each triangle to sample a different
+              // palette column → star-burst discontinuity. Fix: pin every pole vertex to U=0.5.
+              const uv = geo.attributes.uv as THREE.BufferAttribute
+              const W = 64, H = 32
+              for (let i = 0; i <= W; i++) uv.setX(i, 0.5)
+              for (let i = (W + 1) * H; i < (W + 1) * (H + 1); i++) uv.setX(i, 0.5)
+              uv.needsUpdate = true
+            }} />
             <meshBasicMaterial map={texture} />
+          </mesh>
+        ) : topology === 'cylindrical' ? (
+          <mesh ref={meshRef}>
+            <cylinderGeometry args={[0.35, 0.35, 0.7, 64, 1, true]} />
+            <meshBasicMaterial map={texture} side={THREE.DoubleSide} />
           </mesh>
         ) : (
           <mesh ref={meshRef}>

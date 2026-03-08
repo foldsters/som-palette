@@ -43,8 +43,9 @@ interface Params {
   quality: number
   blendDecay: number  // 0.5 = linear, <0.5 = fast early drop, >0.5 = slow early drop
   radiusDecay: number
-  topology: 'traditional' | 'tileable' | 'sphere'
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical'
   gaussian: boolean
+  randomInit: boolean
 }
 
 const DEFAULT_PARAMS: Params = {
@@ -53,8 +54,9 @@ const DEFAULT_PARAMS: Params = {
   quality: 3,
   blendDecay: 0.5,
   radiusDecay: 0.5,
-  topology: 'tileable',
+  topology: 'toroidal',
   gaussian: true,
+  randomInit: false,
 }
 
 // ─── Slider ──────────────────────────────────────────────────────────────────
@@ -98,6 +100,7 @@ export default function App() {
   const [imageData, setImageData]   = useState<ImageData | null>(null)
   const [paletteCopy, setPaletteCopy] = useState<Float32Array | null>(null)
   const [dragging, setDragging]     = useState(false)
+  const [copiedHex, setCopiedHex]   = useState<string | null>(null)
 
   const paletteCanvasRef = useRef<HTMLCanvasElement>(null)
   const imageCanvasRef   = useRef<HTMLCanvasElement>(null)
@@ -180,6 +183,7 @@ export default function App() {
     const total = Math.max(1, Math.round(Math.pow(10, p.quality / 2)))
     totalIterRef.current = total
     iterRef.current = 0
+
     // Init GL or CPU palette buffer
     const glsom = glomRef.current
     if (glsom) {
@@ -188,6 +192,20 @@ export default function App() {
     } else {
       paletteRef.current = new Float32Array(p.rows * p.cols * 3)
     }
+
+    // Random initialization: sample palette cells from image pixels
+    if (p.randomInit) {
+      const totalPixels = data.width * data.height
+      const palette = paletteRef.current
+      for (let i = 0; i < p.rows * p.cols; i++) {
+        const pi = Math.floor(Math.random() * totalPixels) * 4
+        palette[i * 3]     = data.data[pi]     / 255
+        palette[i * 3 + 1] = data.data[pi + 1] / 255
+        palette[i * 3 + 2] = data.data[pi + 2] / 255
+      }
+      if (glsom) glsom.uploadMirror()
+    }
+
     setRunning(true)
     setProgress(0)
     setPaletteCopy(null)
@@ -244,16 +262,52 @@ export default function App() {
     const canvas = paletteCanvasRef.current
     if (!canvas) return
     const p = paramsRef.current
-    smoothPaletteCanvas(canvas, paletteRef.current, p.rows, p.cols, p.topology === 'tileable')
+    smoothPaletteCanvas(canvas, paletteRef.current, p.rows, p.cols, p.topology === 'toroidal')
   }, [])
 
-  const handleExport = useCallback(() => {
+  const handleExportPNG = useCallback(() => {
     const canvas = paletteCanvasRef.current
     if (!canvas) return
     const link = document.createElement('a')
     link.download = 'palette.png'
     link.href = canvas.toDataURL('image/png')
     link.click()
+  }, [])
+
+  const handleExportGPL = useCallback(() => {
+    const p = paramsRef.current
+    const palette = paletteRef.current
+    const { rows, cols } = p
+    const lines = ['GIMP Palette', 'Name: SOM Palette', `Columns: ${cols}`, '#']
+    for (let i = 0; i < rows * cols; i++) {
+      const r = palette[i * 3], g = palette[i * 3 + 1], b = palette[i * 3 + 2]
+      const ri = Math.round(Math.max(0, Math.min(1, r)) * 255)
+      const gi = Math.round(Math.max(0, Math.min(1, g)) * 255)
+      const bi = Math.round(Math.max(0, Math.min(1, b)) * 255)
+      lines.push(`${ri.toString().padStart(3)} ${gi.toString().padStart(3)} ${bi.toString().padStart(3)}\tUntitled`)
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
+    const link = document.createElement('a')
+    link.download = 'palette.gpl'
+    link.href = URL.createObjectURL(blob)
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }, [])
+
+  const handlePaletteClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = paletteCanvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const x = Math.floor((e.clientX - rect.left) / rect.width  * canvas.width)
+    const y = Math.floor((e.clientY - rect.top)  / rect.height * canvas.height)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const px = ctx.getImageData(x, y, 1, 1).data
+    const hex = `#${px[0].toString(16).padStart(2,'0')}${px[1].toString(16).padStart(2,'0')}${px[2].toString(16).padStart(2,'0')}`
+    navigator.clipboard.writeText(hex).then(() => {
+      setCopiedHex(hex)
+      setTimeout(() => setCopiedHex(null), 1500)
+    })
   }, [])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -268,8 +322,6 @@ export default function App() {
   // ─── Derived ───────────────────────────────────────────────────────────────
 
   const totalIter = Math.max(1, Math.round(Math.pow(10, params.quality / 2)))
-
-  // Palette canvas: 1px per cell, CSS handles display scaling
 
   function setParam<K extends keyof Params>(key: K, val: Params[K]) {
     setParams(p => ({ ...p, [key]: val }))
@@ -341,7 +393,7 @@ export default function App() {
 
         {/* Palette canvas */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minWidth: 0 }}>
-          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE</span>
+          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
           <div style={{
             position: 'relative', borderRadius: '10px', overflow: 'hidden',
             border: `1px solid ${BORDER}`,
@@ -351,8 +403,31 @@ export default function App() {
               ref={paletteCanvasRef}
               width={params.cols}
               height={params.rows}
-              style={{ display: 'block', height: CANVAS_SIZE, width: `min(${CANVAS_SIZE * params.cols / params.rows}px, 100%)` }}
+              style={{
+                display: 'block',
+                height: CANVAS_SIZE,
+                width: `min(${CANVAS_SIZE * params.cols / params.rows}px, 100%)`,
+                cursor: 'crosshair',
+                imageRendering: 'pixelated',
+              }}
+              onClick={handlePaletteClick}
             />
+            {/* Copy toast */}
+            {copiedHex && (
+              <div style={{
+                position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
+                background: 'rgba(0,8,20,0.92)', border: `1px solid ${ACCENT}`,
+                borderRadius: '6px', padding: '5px 12px',
+                display: 'flex', alignItems: 'center', gap: '8px',
+                fontSize: '12px', color: TEXT, pointerEvents: 'none',
+              }}>
+                <span style={{
+                  display: 'inline-block', width: '12px', height: '12px',
+                  borderRadius: '2px', background: copiedHex, border: '1px solid rgba(255,255,255,0.2)',
+                }} />
+                {copiedHex} copied
+              </div>
+            )}
             {running && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -402,8 +477,8 @@ export default function App() {
             </Canvas>
           </div>
 
-          {/* Sphere / Torus — shown for sphere and tileable topologies */}
-          {params.topology !== 'traditional' && (
+          {/* Topology 3D view — shown for non-rectangular topologies */}
+          {params.topology !== 'rectangular' && (
             <div style={{
               flex: 1, borderRadius: '10px', overflow: 'hidden',
               border: `1px solid ${BORDER}`, background: '#030810',
@@ -459,12 +534,15 @@ export default function App() {
             <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} onChange={v => setParam('radiusDecay', v)} />
           </div>
 
-          {/* Buttons */}
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+          {/* Controls + actions */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
 
             {/* Topology toggle */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>TOPOLOGY</span>
             <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-              {(['Traditional', 'Tileable', 'Sphere'] as const).map(mode => {
+              {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
                 const active = params.topology === mode.toLowerCase()
                 return (
                   <button
@@ -484,8 +562,11 @@ export default function App() {
                 )
               })}
             </div>
+            </div>
 
             {/* Neighbourhood toggle */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>MASK</span>
             <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
               {(['Hard', 'Gaussian'] as const).map(mode => {
                 const active = (mode === 'Gaussian') === params.gaussian
@@ -507,12 +588,43 @@ export default function App() {
                 )
               })}
             </div>
+            </div>
 
+            {/* Init toggle */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>INIT</span>
+              <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
+                {(['Zero', 'Random'] as const).map(mode => {
+                  const active = (mode === 'Random') === params.randomInit
+                  return (
+                    <button
+                      key={mode}
+                      onClick={() => setParam('randomInit', mode === 'Random')}
+                      disabled={running}
+                      style={{
+                        padding: '6px 16px', border: 'none',
+                        cursor: running ? 'not-allowed' : 'pointer',
+                        background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                        color: active ? ACCENT : MUTED,
+                        fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                      }}
+                    >
+                      {mode}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+          </div>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
             <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(!running, running)}>
               {running ? '■ Stop' : '▶ Draw'}
             </button>
             <button onClick={handleSmooth} disabled={running} style={btn()}>Smooth</button>
-            <button onClick={handleExport} disabled={running} style={btn()}>Export PNG</button>
+            <button onClick={handleExportPNG} disabled={running} style={btn()}>Export PNG</button>
+            <button onClick={handleExportGPL} disabled={running} style={btn()}>Export GPL</button>
+          </div>
           </div>
         </div>
 

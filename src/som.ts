@@ -1,3 +1,4 @@
+
 /**
  * Self-Organizing Map (SOM) palette extraction.
  *
@@ -7,8 +8,8 @@
  *  3. Moves all cells within `radius` of the BMU toward the sampled color
  *     by a factor of `blend`.
  *
- * In tileable mode edges wrap, producing a seamless palette texture.
- * In traditional mode edges are open, producing HSV/RGB-slice-like corners.
+ * In toroidal mode edges wrap, producing a seamless palette texture.
+ * In rectangular mode edges are open, producing HSV/RGB-slice-like corners.
  */
 // Blend and radius both decay from 1.0 → 0.01 over training.
 // `decay` controls the curve: 0.5 = linear, <0.5 = fast early drop, >0.5 = slow early drop.
@@ -26,10 +27,10 @@ export function runSOMBatch(
   totalIter: number,
   blendDecay: number,
   radiusDecay: number,
-  topology: 'traditional' | 'tileable' | 'sphere',
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical',
   gaussian: boolean,
 ): void {
-  const diagonal = topology === 'sphere' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
+  const diagonal = topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
   const totalPixels = imageData.width * imageData.height
   const blendExp    = Math.pow(10, 2 * blendDecay - 1)
   const radiusExp   = Math.pow(10, 2 * radiusDecay - 1)
@@ -43,9 +44,10 @@ export function runSOMBatch(
 
     // Sample random pixel
     const pi = Math.floor(Math.random() * totalPixels) * 4
-    const pr = imageData.data[pi] / 255
-    const pg = imageData.data[pi + 1] / 255
-    const pb = imageData.data[pi + 2] / 255
+    const rr = imageData.data[pi]     / 255
+    const rg = imageData.data[pi + 1] / 255
+    const rb = imageData.data[pi + 2] / 255
+    const [pr, pg, pb] = [rr, rg, rb]
 
     // Find BMU (closest palette cell in RGB space)
     let minDist = Infinity
@@ -70,7 +72,7 @@ export function runSOMBatch(
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         let dist: number
-        if (topology === 'sphere') {
+        if (topology === 'spherical') {
           const theta1 = (col     / cols) * 2 * Math.PI
           const phi1   = (row     / rows) * Math.PI
           const theta2 = (bmuCol  / cols) * 2 * Math.PI
@@ -80,9 +82,11 @@ export function runSOMBatch(
         } else {
           let dx = col - bmuCol
           let dy = row - bmuRow
-          if (topology === 'tileable') {
+          if (topology === 'toroidal') {
             if (Math.abs(dx) > cols / 2) dx -= Math.sign(dx) * cols
             if (Math.abs(dy) > rows / 2) dy -= Math.sign(dy) * rows
+          } else if (topology === 'cylindrical') {
+            if (Math.abs(dx) > cols / 2) dx -= Math.sign(dx) * cols
           }
           dist = Math.sqrt(dx * dx + dy * dy)
         }
@@ -110,9 +114,10 @@ export function renderPalette(
   const img = ctx.createImageData(cols, rows)
   const d = img.data
   for (let i = 0; i < rows * cols; i++) {
-    d[i * 4]     = Math.round(Math.max(0, Math.min(1, palette[i * 3]))     * 255)
-    d[i * 4 + 1] = Math.round(Math.max(0, Math.min(1, palette[i * 3 + 1])) * 255)
-    d[i * 4 + 2] = Math.round(Math.max(0, Math.min(1, palette[i * 3 + 2])) * 255)
+    const r = palette[i * 3], g = palette[i * 3 + 1], b = palette[i * 3 + 2]
+    d[i * 4]     = Math.round(Math.max(0, Math.min(1, r)) * 255)
+    d[i * 4 + 1] = Math.round(Math.max(0, Math.min(1, g)) * 255)
+    d[i * 4 + 2] = Math.round(Math.max(0, Math.min(1, b)) * 255)
     d[i * 4 + 3] = 255
   }
   ctx.putImageData(img, 0, 0)
@@ -121,7 +126,7 @@ export function renderPalette(
 /**
  * Blur the palette canvas using a separable Gaussian blur written directly
  * to pixel data (works correctly on export and avoids CSS-blur edge darkening).
- * In tileable mode edges wrap; otherwise they clamp.
+ * In toroidal mode edges wrap; otherwise they clamp.
  */
 export function smoothPaletteCanvas(
   canvas: HTMLCanvasElement,

@@ -1,3 +1,4 @@
+
 // ─── Shaders ─────────────────────────────────────────────────────────────────
 
 const VERT = `#version 300 es
@@ -20,7 +21,7 @@ uniform vec2 u_bmu;       // BMU grid position in GPU coords (y=0 at bottom)
 uniform vec3 u_color;     // sampled pixel RGB [0,1]
 uniform float u_blend;
 uniform float u_radius;   // neighbourhood radius in grid cells
-uniform int u_topology;  // 0=traditional 1=tileable 2=sphere
+uniform int u_topology;  // 0=rectangular 1=cylindrical 2=toroidal 3=spherical
 uniform bool u_gaussian;
 
 #define PI 3.14159265358979
@@ -42,13 +43,15 @@ void main() {
 
   vec2 gridPos = floor(v_uv * u_size);
   float d;
-  if (u_topology == 2) {
+  if (u_topology == 3) {
     d = sphereDist(gridPos, u_bmu, u_size);
   } else {
     vec2 diff = gridPos - u_bmu;
-    if (u_topology == 1) {
+    if (u_topology == 2) {
       if (abs(diff.x) > u_size.x * 0.5) diff.x -= sign(diff.x) * u_size.x;
       if (abs(diff.y) > u_size.y * 0.5) diff.y -= sign(diff.y) * u_size.y;
+    } else if (u_topology == 1) {
+      if (abs(diff.x) > u_size.x * 0.5) diff.x -= sign(diff.x) * u_size.x;
     }
     d = length(diff);
   }
@@ -193,6 +196,25 @@ export class GLSOM {
     this.current = 0
   }
 
+  /** Upload cpuMirror to both ping-pong textures (call after externally modifying cpuMirror). */
+  uploadMirror(): void {
+    const { rows, cols } = this
+    const gl = this.gl
+    const data = new Float32Array(rows * cols * 4)
+    for (let i = 0; i < rows * cols; i++) {
+      data[i * 4]     = this.cpuMirror[i * 3]
+      data[i * 4 + 1] = this.cpuMirror[i * 3 + 1]
+      data[i * 4 + 2] = this.cpuMirror[i * 3 + 2]
+      data[i * 4 + 3] = 1.0
+    }
+    for (let i = 0; i < 2; i++) {
+      gl.bindTexture(gl.TEXTURE_2D, this.textures[i])
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, cols, rows, 0, gl.RGBA, gl.FLOAT, data)
+    }
+    gl.bindTexture(gl.TEXTURE_2D, null)
+    this.current = 0
+  }
+
   /**
    * Run fromIter..toIter SOM iterations on the GPU.
    * CPU mirror is used for BMU search (stale by up to one batch — fine for SOM).
@@ -205,11 +227,11 @@ export class GLSOM {
     totalIter: number,
     blendDecay: number,
     radiusDecay: number,
-    topology: 'traditional' | 'tileable' | 'sphere',
+    topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical',
     gaussian: boolean,
   ): void {
     const { rows, cols } = this
-    const diagonal = topology === 'sphere' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
+    const diagonal = topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
     const totalPixels = imageData.width * imageData.height
     const gl          = this.gl
     const mirror      = this.cpuMirror
@@ -230,9 +252,10 @@ export class GLSOM {
 
       // Sample random pixel from image
       const pi = Math.floor(Math.random() * totalPixels) * 4
-      const r = imageData.data[pi]     / 255
-      const g = imageData.data[pi + 1] / 255
-      const b = imageData.data[pi + 2] / 255
+      const rr = imageData.data[pi]     / 255
+      const rg = imageData.data[pi + 1] / 255
+      const rb = imageData.data[pi + 2] / 255
+      const [r, g, b] = [rr, rg, rb]
 
       // BMU search on CPU mirror (top-to-bottom row order)
       let minDist = Infinity, bmuCol = 0, bmuRow = 0
@@ -261,7 +284,10 @@ export class GLSOM {
       gl.uniform3f(this.uColor, r, g, b)
       gl.uniform1f(this.uBlend, blend)
       gl.uniform1f(this.uRadius, radius)
-      gl.uniform1i(this.uTopology, topology === 'traditional' ? 0 : topology === 'tileable' ? 1 : 2)
+      gl.uniform1i(this.uTopology,
+        topology === 'rectangular'  ? 0 :
+        topology === 'cylindrical'  ? 1 :
+        topology === 'toroidal'     ? 2 : 3)
       gl.uniform1i(this.uGaussian, gaussian ? 1 : 0)
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
