@@ -4,6 +4,7 @@ import { OrbitControls, Line } from '@react-three/drei'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import * as THREE from 'three'
 import { convertVizCoords, linearize, VIZ_AXIS_COLORS, FRAME_TYPE, type VizSpace } from './colorSpaces'
+import { CUBE_EDGE_LIGHT, CUBE_EDGE_DARK, MESH_BG_DARK } from './theme'
 
 // ─── Circle sprite texture (created once) ────────────────────────────────────
 
@@ -269,7 +270,7 @@ const CYL_SPOKES: [[number,number,number],[number,number,number]][] =
 
 function CubeFrame({ vizSpace, lightMode }: { vizSpace: VizSpace; lightMode: boolean }) {
   const [cx, cy, cz] = VIZ_AXIS_COLORS[vizSpace]
-  const edge = lightMode ? '#b8cce0' : '#152844'
+  const edge = lightMode ? CUBE_EDGE_LIGHT : CUBE_EDGE_DARK
   return (
     <>
       {CUBE_EDGES.map(([a, b], i) => <Line key={i} points={[a, b]} color={edge} lineWidth={1} />)}
@@ -282,7 +283,7 @@ function CubeFrame({ vizSpace, lightMode }: { vizSpace: VizSpace; lightMode: boo
 
 function CylinderFrame({ vizSpace, lightMode }: { vizSpace: VizSpace; lightMode: boolean }) {
   const [,, lColor] = VIZ_AXIS_COLORS[vizSpace]
-  const edge = lightMode ? '#b8cce0' : '#152844'
+  const edge = lightMode ? CUBE_EDGE_LIGHT : CUBE_EDGE_DARK
   const mid  = lightMode ? '#888888' : '#555555'
   return (
     <>
@@ -331,7 +332,7 @@ export default function ColorCube({ imageData, palette, rows, cols, vizSpace, li
 
   return (
     <>
-      <color attach="background" args={[lightMode ? '#e4f0fa' : '#030810']} />
+      <color attach="background" args={[lightMode ? '#eeeeee' : '#080808']} />
       <OrbitControls ref={controlsRef} enableZoom enableRotate makeDefault
         mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE }}
         touches={{ ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }}
@@ -459,7 +460,7 @@ export function TopologyScene({ paletteCanvasRef, lightModeRef, topologyRef, pal
     // ── Scene background ────────────────────────────────────────────────────
     if (lightMode !== lastLightModeForBg.current) {
       lastLightModeForBg.current = lightMode
-      state.scene.background = new THREE.Color(lightMode ? 0xe4f0fa : 0x030810)
+      state.scene.background = new THREE.Color(lightMode ? 0xeeeeee : 0x080808)
     }
 
     // ── Topology geometry swap (also re-runs when rectangular dimensions change) ─
@@ -501,7 +502,7 @@ export function TopologyScene({ paletteCanvasRef, lightModeRef, topologyRef, pal
 
     // ── Colour — set every frame so lightMode flips apply instantly ─────────
     const hasTex = ready && !!textureRef.current
-    mat.color.setHex(hasTex ? 0xffffff : (lightMode ? 0xffffff : 0x0f2540))
+    mat.color.setHex(hasTex ? 0xffffff : (lightMode ? 0xffffff : MESH_BG_DARK))
 
     // ── Auto-rotation ───────────────────────────────────────────────────────
     if (!interacted.current) mesh.rotation.y += delta * 0.25

@@ -4,38 +4,7 @@ import ColorCube, { TopologyScene } from './ColorCube'
 import { runSOMBatch, renderPalette } from './som'
 import { GLSOM } from './glSOM'
 import { type VizSpace, VIZ_AXES } from './colorSpaces'
-
-// ─── Theme ───────────────────────────────────────────────────────────────────
-
-interface Theme {
-  accent: string
-  muted: string
-  text: string
-  panel: string
-  border: string
-  bg: string
-  canvas3d: string
-}
-
-const DARK: Theme = {
-  accent:   'rgb(50, 100, 200)',
-  muted:    'rgb(100, 140, 180)',
-  text:     '#A9B7C5',
-  panel:    'rgba(8, 18, 36, 0.9)',
-  border:   'rgba(50, 100, 200, 0.2)',
-  bg:       '#030810',
-  canvas3d: '#030810',
-}
-
-const LIGHT: Theme = {
-  accent:   'rgb(40, 90, 190)',
-  muted:    'rgb(60, 110, 160)',
-  text:     '#1a2a3a',
-  panel:    'rgba(255, 255, 255, 0.82)',
-  border:   'rgba(50, 100, 200, 0.28)',
-  bg:       '#d8eaf8',
-  canvas3d: '#e4f0fa',
-}
+import { type Theme, deriveTheme, extractPaletteCorners, DANGER, DANGER_BG, DRAG_OVERLAY, MODAL_SCRIM } from './theme'
 
 const CANVAS_SIZE = 400
 
@@ -45,11 +14,11 @@ function btn(T: Theme, active = false, danger = false): React.CSSProperties {
   return {
     padding: '6px 16px',
     borderRadius: '6px',
-    border: `1px solid ${danger ? 'rgb(200,80,80)' : active ? T.accent : T.border}`,
+    border: `1px solid ${danger ? DANGER : active ? T.accent : T.border}`,
     background: danger
-      ? 'rgba(200,80,80,0.15)'
+      ? DANGER_BG
       : active
-      ? 'rgba(50,100,200,0.2)'
+      ? T.border
       : 'transparent',
     color: T.text,
     cursor: 'pointer',
@@ -130,17 +99,19 @@ export default function App() {
   const [running, setRunning]         = useState(false)
   const [progress, setProgress]       = useState(0)
   const [imageData, setImageData]     = useState<ImageData | null>(null)
-  const [paletteCopy, setPaletteCopy] = useState<Float32Array | null>(null)
-  const [autoRun, setAutoRun]         = useState(false)
+  const [paletteCopy, setPaletteCopy]       = useState<Float32Array | null>(null)
+  const [paletteCorners, setPaletteCorners] = useState<Float32Array | null>(null)
+  const [autoRun, setAutoRun]               = useState(false)
   const [dragging, setDragging]       = useState(false)
   const [copiedHex, setCopiedHex]     = useState<string | null>(null)
   const [collapsed, setCollapsed]     = useState(false)
   const [vizSpace, setVizSpace]       = useState<VizSpace>('rgb')
   const [lightMode, setLightMode]     = useState(false)
+  const [chromaMode, setChromaMode]   = useState(true)
   const [compress, setCompress]       = useState(false)
   const [showInfo, setShowInfo]       = useState(false)
 
-  const T = lightMode ? LIGHT : DARK
+  const T = deriveTheme(chromaMode ? paletteCorners : null, lightMode)
 
   const paletteCanvasRef = useRef<HTMLCanvasElement>(null)
   const imageCanvasRef   = useRef<HTMLCanvasElement>(null)
@@ -199,6 +170,7 @@ export default function App() {
     if (canvas) { const ctx = canvas.getContext('2d'); ctx?.clearRect(0, 0, canvas.width, canvas.height) }
     setProgress(0)
     setPaletteCopy(null)
+    setPaletteCorners(null)
     paletteReadyRef.current = false
   }, [params.rows, params.cols, params.topology, params.gaussian])
 
@@ -230,6 +202,7 @@ export default function App() {
       if (pc) { const pctx = pc.getContext('2d'); pctx?.clearRect(0, 0, pc.width, pc.height) }
       setProgress(0)
       setPaletteCopy(null)
+      setPaletteCorners(null)
       paletteReadyRef.current = false
     }
     img.src = src
@@ -253,6 +226,7 @@ export default function App() {
     if (animRef.current) cancelAnimationFrame(animRef.current)
     animRef.current = null
     setRunning(false)
+    setPaletteCorners(extractPaletteCorners(paletteRef.current, paramsRef.current.rows, paramsRef.current.cols))
     setPaletteCopy(new Float32Array(paletteRef.current))
   }, [])
 
@@ -334,6 +308,7 @@ export default function App() {
         glomRef.current?.flush()
         animRef.current = null
         setRunning(false)
+        setPaletteCorners(extractPaletteCorners(paletteRef.current, p.rows, p.cols))
         setPaletteCopy(new Float32Array(paletteRef.current))
       }
     }
@@ -440,6 +415,9 @@ const handleExportPNG = useCallback(() => {
           <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px' }} title="Toggle light / dark">
             {lightMode ? '◑ dark' : '◐ light'}
           </button>
+          <button onClick={() => setChromaMode(m => !m)} style={{ ...btn(T, chromaMode), padding: '5px 12px' }} title="Use palette corner colors to tint the UI">
+            ✦ chroma
+          </button>
         </div>
       </div>
 
@@ -449,7 +427,7 @@ const handleExportPNG = useCallback(() => {
           onClick={() => setShowInfo(false)}
           style={{
             position: 'fixed', inset: 0, zIndex: 100,
-            background: 'rgba(0,0,0,0.6)',
+            background: MODAL_SCRIM,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             padding: '24px',
           }}
@@ -537,6 +515,18 @@ const handleExportPNG = useCallback(() => {
                 ))}
               </div>
             ))}
+
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: '8px', paddingTop: '16px', color: T.muted, fontSize: '11px' }}>
+              Made by{' '}
+              <a
+                href="https://bsky.app/profile/foldster.bsky.social"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: T.accent, textDecoration: 'none' }}
+              >
+                Foldster's Projects, LLC
+              </a>
+            </div>
           </div>
         </div>
       )}
@@ -614,7 +604,7 @@ const handleExportPNG = useCallback(() => {
                         style={{
                           padding: '6px 16px', border: 'none',
                           cursor: running ? 'not-allowed' : 'pointer',
-                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                          background: active ? T.border : 'transparent',
                           color: active ? T.accent : T.muted,
                           fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
                         }}
@@ -640,7 +630,7 @@ const handleExportPNG = useCallback(() => {
                         style={{
                           padding: '6px 16px', border: 'none',
                           cursor: running ? 'not-allowed' : 'pointer',
-                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                          background: active ? T.border : 'transparent',
                           color: active ? T.accent : T.muted,
                           fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
                         }}
@@ -729,7 +719,7 @@ const handleExportPNG = useCallback(() => {
               <div style={{
                 position: 'absolute', inset: 0, display: 'flex',
                 alignItems: 'center', justifyContent: 'center',
-                background: 'rgba(0,10,30,0.75)', color: T.accent,
+                background: DRAG_OVERLAY, color: T.accent,
                 fontSize: '13px', letterSpacing: '0.1em',
               }}>
                 DROP IMAGE
@@ -750,7 +740,7 @@ const handleExportPNG = useCallback(() => {
           <div style={{
             position: 'relative', borderRadius: '10px', overflow: 'hidden',
             border: `1px solid ${T.border}`,
-            background: lightMode ? '#c8dff0' : '#050d1a',
+            background: T.paletteBg,
           }}>
             <canvas
               ref={paletteCanvasRef}
@@ -768,7 +758,7 @@ const handleExportPNG = useCallback(() => {
             {copiedHex && (
               <div style={{
                 position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
-                background: lightMode ? 'rgba(220,234,248,0.95)' : 'rgba(0,8,20,0.92)', border: `1px solid ${T.accent}`,
+                background: T.overlayBg, border: `1px solid ${T.accent}`,
                 borderRadius: '6px', padding: '5px 12px',
                 display: 'flex', alignItems: 'center', gap: '8px',
                 fontSize: '12px', color: T.text, pointerEvents: 'none',
@@ -783,7 +773,7 @@ const handleExportPNG = useCallback(() => {
             {running && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
-                background: lightMode ? 'rgba(220,234,248,0.92)' : 'rgba(0,8,20,0.85)', padding: '8px 12px',
+                background: T.overlayBg, padding: '8px 12px',
               }}>
                 <div style={{
                   display: 'flex', justifyContent: 'space-between',
@@ -792,7 +782,7 @@ const handleExportPNG = useCallback(() => {
                   <span>training</span>
                   <span>{Math.round(progress * 100)}%</span>
                 </div>
-                <div style={{ height: '3px', background: 'rgba(50,100,200,0.2)', borderRadius: '2px' }}>
+                <div style={{ height: '3px', background: T.border, borderRadius: '2px' }}>
                   <div style={{
                     height: '100%', width: `${progress * 100}%`,
                     background: T.accent, borderRadius: '2px',
@@ -834,7 +824,7 @@ const handleExportPNG = useCallback(() => {
                     style={{
                       padding: '3px 8px', borderRadius: '4px',
                       border: `1px solid ${active ? T.accent : T.border}`,
-                      background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                      background: active ? T.border : 'transparent',
                       color: active ? T.accent : T.muted,
                       fontFamily: 'inherit', fontSize: '10px',
                       cursor: 'pointer', letterSpacing: '0.05em',
@@ -855,7 +845,7 @@ const handleExportPNG = useCallback(() => {
                       onClick={() => setCompress(val)}
                       style={{
                         padding: '3px 8px', border: 'none',
-                        background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                        background: active ? T.border : 'transparent',
                         color: active ? T.accent : T.muted,
                         fontFamily: 'inherit', fontSize: '10px',
                         cursor: 'pointer', letterSpacing: '0.05em',
@@ -921,7 +911,7 @@ const handleExportPNG = useCallback(() => {
                     style={{
                       padding: '3px 8px', border: 'none',
                       cursor: running ? 'not-allowed' : 'pointer',
-                      background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                      background: active ? T.border : 'transparent',
                       color: active ? T.accent : T.muted,
                       fontFamily: 'inherit', fontSize: '10px', transition: 'all 0.15s',
                       letterSpacing: '0.05em',
