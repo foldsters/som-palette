@@ -24,7 +24,7 @@ const CIRCLE_TEX = makeCircleTex()
 
 function ImageCloud({ imageData, vizSpace, compress, lightMode }: { imageData: ImageData; vizSpace: VizSpace; compress: boolean; lightMode: boolean }) {
   const { positions, colors } = useMemo(() => {
-    const maxPoints = 8000
+    const maxPoints = 2000
     const total = imageData.width * imageData.height
     const step = Math.max(1, Math.floor(total / maxPoints))
     const pos: number[] = []
@@ -100,14 +100,12 @@ function PaletteGrid({ palette, rows, cols, vizSpace, compress, lightMode, topol
         col.push(linearize(cr), linearize(cg), linearize(cb))
       }
     }
-    // Interior edges
     for (let row = 0; row < rows; row++) {
       for (let c = 0; c < cols; c++) {
         if (c + 1 < cols) push(row * cols + c, row * cols + c + 1)
         if (row + 1 < rows) push(row * cols + c, (row + 1) * cols + c)
       }
     }
-    // Wrap edges by topology
     if (topology === 'cylindrical' || topology === 'toroidal' || topology === 'spherical' || topology === 'projective') {
       for (let row = 0; row < rows; row++)
         push(row * cols + (cols - 1), row * cols)

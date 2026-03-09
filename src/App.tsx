@@ -152,6 +152,7 @@ export default function App() {
   const glomRef          = useRef<GLSOM | null>(null)
   const usingGLRef       = useRef(false)
 
+
   // Mutable refs passed into the R3F topology scene so useFrame always reads
   // the latest values (plain props can go stale across R3F's separate reconciler).
   const lightModeRef    = useRef(lightMode)
@@ -288,7 +289,6 @@ export default function App() {
     setRunning(true)
     setProgress(0)
     setPaletteCopy(null)
-
     const batchSize = Math.max(10, Math.ceil(total / 300))
 
     function tick() {
