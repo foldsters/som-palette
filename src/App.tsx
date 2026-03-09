@@ -1,32 +1,57 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Canvas } from '@react-three/fiber'
 import ColorCube, { TopologyScene } from './ColorCube'
-import { runSOMBatch, renderPalette, smoothPaletteCanvas } from './som'
+import { runSOMBatch, renderPalette } from './som'
 import { GLSOM } from './glSOM'
+import { type VizSpace, VIZ_AXES } from './colorSpaces'
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Theme ───────────────────────────────────────────────────────────────────
 
-const ACCENT = 'rgb(50, 100, 200)'
-const MUTED   = 'rgb(100, 140, 180)'
-const TEXT    = '#A9B7C5'
-const PANEL   = 'rgba(8, 18, 36, 0.9)'
-const BORDER  = 'rgba(50, 100, 200, 0.2)'
+interface Theme {
+  accent: string
+  muted: string
+  text: string
+  panel: string
+  border: string
+  bg: string
+  canvas3d: string
+}
+
+const DARK: Theme = {
+  accent:   'rgb(50, 100, 200)',
+  muted:    'rgb(100, 140, 180)',
+  text:     '#A9B7C5',
+  panel:    'rgba(8, 18, 36, 0.9)',
+  border:   'rgba(50, 100, 200, 0.2)',
+  bg:       '#030810',
+  canvas3d: '#030810',
+}
+
+const LIGHT: Theme = {
+  accent:   'rgb(40, 90, 190)',
+  muted:    'rgb(60, 110, 160)',
+  text:     '#1a2a3a',
+  panel:    'rgba(255, 255, 255, 0.82)',
+  border:   'rgba(50, 100, 200, 0.28)',
+  bg:       '#d8eaf8',
+  canvas3d: '#e4f0fa',
+}
 
 const CANVAS_SIZE = 400
 
 // ─── Shared button style ─────────────────────────────────────────────────────
 
-function btn(active = false, danger = false): React.CSSProperties {
+function btn(T: Theme, active = false, danger = false): React.CSSProperties {
   return {
     padding: '6px 16px',
     borderRadius: '6px',
-    border: `1px solid ${danger ? 'rgb(200,80,80)' : active ? ACCENT : BORDER}`,
+    border: `1px solid ${danger ? 'rgb(200,80,80)' : active ? T.accent : T.border}`,
     background: danger
       ? 'rgba(200,80,80,0.15)'
       : active
       ? 'rgba(50,100,200,0.2)'
       : 'transparent',
-    color: TEXT,
+    color: T.text,
     cursor: 'pointer',
     fontFamily: 'inherit',
     fontSize: '12px',
@@ -41,26 +66,29 @@ interface Params {
   rows: number
   cols: number
   quality: number
-  blendDecay: number  // 0.5 = linear, <0.5 = fast early drop, >0.5 = slow early drop
+  blendDecay: number
   radiusDecay: number
-  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical'
+  topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone'
   gaussian: boolean
   randomInit: boolean
+  maskColor: string | null
+  maskTolerance: number
 }
 
 const DEFAULT_PARAMS: Params = {
   rows: 8,
   cols: 8,
-  quality: 3,
+  quality: 5.4,
   blendDecay: 0.5,
   radiusDecay: 0.5,
   topology: 'toroidal',
   gaussian: true,
-  randomInit: false,
+  randomInit: true,
+  maskColor: null,
+  maskTolerance: 0.15,
 }
 
 // ─── Slider ──────────────────────────────────────────────────────────────────
-// Must live outside App so React doesn't remount it on every render.
 
 interface SliderProps {
   label: string
@@ -70,15 +98,18 @@ interface SliderProps {
   step: number
   display?: string
   disabled?: boolean
+  muted: string
+  text: string
   onChange: (val: number) => void
+  onRelease?: () => void
 }
 
-function Slider({ label, value, min, max, step, display, disabled, onChange }: SliderProps) {
+function Slider({ label, value, min, max, step, display, disabled, muted, text, onChange, onRelease }: SliderProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px' }}>
-        <span style={{ color: MUTED }}>{label}</span>
-        <span style={{ color: TEXT }}>{display ?? value.toFixed(2)}</span>
+        <span style={{ color: muted }}>{label}</span>
+        <span style={{ color: text }}>{display ?? value.toFixed(2)}</span>
       </div>
       <input
         type="range"
@@ -86,6 +117,7 @@ function Slider({ label, value, min, max, step, display, disabled, onChange }: S
         value={value}
         disabled={disabled}
         onChange={e => onChange(parseFloat(e.target.value))}
+        onPointerUp={onRelease}
       />
     </div>
   )
@@ -94,13 +126,21 @@ function Slider({ label, value, min, max, step, display, disabled, onChange }: S
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [params, setParams]         = useState<Params>(DEFAULT_PARAMS)
-  const [running, setRunning]       = useState(false)
-  const [progress, setProgress]     = useState(0)
-  const [imageData, setImageData]   = useState<ImageData | null>(null)
+  const [params, setParams]           = useState<Params>(DEFAULT_PARAMS)
+  const [running, setRunning]         = useState(false)
+  const [progress, setProgress]       = useState(0)
+  const [imageData, setImageData]     = useState<ImageData | null>(null)
   const [paletteCopy, setPaletteCopy] = useState<Float32Array | null>(null)
-  const [dragging, setDragging]     = useState(false)
-  const [copiedHex, setCopiedHex]   = useState<string | null>(null)
+  const [autoRun, setAutoRun]         = useState(false)
+  const [dragging, setDragging]       = useState(false)
+  const [copiedHex, setCopiedHex]     = useState<string | null>(null)
+  const [collapsed, setCollapsed]     = useState(false)
+  const [vizSpace, setVizSpace]       = useState<VizSpace>('rgb')
+  const [lightMode, setLightMode]     = useState(false)
+  const [compress, setCompress]       = useState(false)
+  const [showInfo, setShowInfo]       = useState(false)
+
+  const T = lightMode ? LIGHT : DARK
 
   const paletteCanvasRef = useRef<HTMLCanvasElement>(null)
   const imageCanvasRef   = useRef<HTMLCanvasElement>(null)
@@ -111,6 +151,27 @@ export default function App() {
   const paramsRef        = useRef(params)
   const glomRef          = useRef<GLSOM | null>(null)
   const usingGLRef       = useRef(false)
+
+
+  // Mutable refs passed into the R3F topology scene so useFrame always reads
+  // the latest values (plain props can go stale across R3F's separate reconciler).
+  const lightModeRef    = useRef(lightMode)
+  const topologyRef     = useRef(params.topology)
+  const paletteReadyRef = useRef(false)
+  const rowsRef         = useRef(params.rows)
+  const colsRef         = useRef(params.cols)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowInfo(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  useEffect(() => { lightModeRef.current = lightMode },      [lightMode])
+  useEffect(() => { topologyRef.current = params.topology }, [params.topology])
+  useEffect(() => { rowsRef.current = params.rows },         [params.rows])
+  useEffect(() => { colsRef.current = params.cols },         [params.cols])
+  // True while training or after completion; reset to false only on palette reset.
+  useEffect(() => { if (running) paletteReadyRef.current = true }, [running])
 
   // Init WebGL2 SOM once
   useEffect(() => {
@@ -138,11 +199,12 @@ export default function App() {
     if (canvas) { const ctx = canvas.getContext('2d'); ctx?.clearRect(0, 0, canvas.width, canvas.height) }
     setProgress(0)
     setPaletteCopy(null)
+    paletteReadyRef.current = false
   }, [params.rows, params.cols, params.topology, params.gaussian])
 
   // ─── Image loading ─────────────────────────────────────────────────────────
 
-  const loadFromSrc = useCallback((src: string) => {
+  const loadFromSrc = useCallback((src: string, saveToCache = true) => {
     const img = new Image()
     img.crossOrigin = 'anonymous'
     img.onload = () => {
@@ -150,20 +212,40 @@ export default function App() {
       if (!canvas) return
       const ctx = canvas.getContext('2d')
       if (!ctx) return
-      // Cover-fit into CANVAS_SIZE × CANVAS_SIZE
-      const scale = Math.max(CANVAS_SIZE / img.width, CANVAS_SIZE / img.height)
-      const w = img.width * scale
-      const h = img.height * scale
+      // Stretch to fill the full square canvas
       ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
-      ctx.drawImage(img, (CANVAS_SIZE - w) / 2, (CANVAS_SIZE - h) / 2, w, h)
+      ctx.drawImage(img, 0, 0, CANVAS_SIZE, CANVAS_SIZE)
+      if (saveToCache) {
+        try { localStorage.setItem('som_image', canvas.toDataURL('image/jpeg', 0.85)) } catch {}
+      }
       const data = ctx.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE)
       setImageData(data)
+      // Reset palette
+      if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; setRunning(false) }
+      const { rows, cols } = paramsRef.current
+      const glsom = glomRef.current
+      if (glsom) { glsom.init(rows, cols); paletteRef.current = glsom.cpuMirror }
+      else { paletteRef.current = new Float32Array(rows * cols * 3) }
+      const pc = paletteCanvasRef.current
+      if (pc) { const pctx = pc.getContext('2d'); pctx?.clearRect(0, 0, pc.width, pc.height) }
+      setProgress(0)
+      setPaletteCopy(null)
+      paletteReadyRef.current = false
     }
     img.src = src
   }, [])
 
-  // Load default planet image on mount
-  useEffect(() => { loadFromSrc('/planet.jpeg') }, [loadFromSrc])
+  const clearImage = useCallback(() => {
+    localStorage.removeItem('som_image')
+    const canvas = imageCanvasRef.current
+    if (canvas) canvas.getContext('2d')?.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
+    setImageData(null)
+  }, [])
+
+  useEffect(() => {
+    const cached = localStorage.getItem('som_image')
+    loadFromSrc(cached ?? '/planet.jpeg', !cached)
+  }, [loadFromSrc])
 
   // ─── Training ──────────────────────────────────────────────────────────────
 
@@ -184,7 +266,6 @@ export default function App() {
     totalIterRef.current = total
     iterRef.current = 0
 
-    // Init GL or CPU palette buffer
     const glsom = glomRef.current
     if (glsom) {
       glsom.init(p.rows, p.cols)
@@ -193,7 +274,6 @@ export default function App() {
       paletteRef.current = new Float32Array(p.rows * p.cols * 3)
     }
 
-    // Random initialization: sample palette cells from image pixels
     if (p.randomInit) {
       const totalPixels = data.width * data.height
       const palette = paletteRef.current
@@ -209,34 +289,38 @@ export default function App() {
     setRunning(true)
     setProgress(0)
     setPaletteCopy(null)
-
-    // Run ~300 visual updates over the full training
     const batchSize = Math.max(10, Math.ceil(total / 300))
 
     function tick() {
       const p = paramsRef.current
       const from = iterRef.current
       const to   = Math.min(from + batchSize, totalIterRef.current)
+      const maskRGB = p.maskColor ? [
+        parseInt(p.maskColor.slice(1, 3), 16) / 255,
+        parseInt(p.maskColor.slice(3, 5), 16) / 255,
+        parseInt(p.maskColor.slice(5, 7), 16) / 255,
+      ] as [number, number, number] : null
+      const maskTolSq = p.maskTolerance * p.maskTolerance
 
       if (glsom) {
         glsom.runBatch(
           data as ImageData,
           from, to, totalIterRef.current,
           p.blendDecay, p.radiusDecay, p.topology, p.gaussian,
+          maskRGB, maskTolSq,
         )
-        // paletteRef.current already points to glsom.cpuMirror, synced by runBatch
       } else {
         runSOMBatch(
           paletteRef.current, data as ImageData,
           p.rows, p.cols,
           from, to, totalIterRef.current,
           p.blendDecay, p.radiusDecay, p.topology, p.gaussian,
+          maskRGB, maskTolSq,
         )
       }
 
       iterRef.current = to
 
-      // Always update 2D canvas
       if (paletteCanvasRef.current) {
         renderPalette(paletteCanvasRef.current, paletteRef.current, p.rows, p.cols)
       }
@@ -247,6 +331,7 @@ export default function App() {
       if (to < totalIterRef.current) {
         animRef.current = requestAnimationFrame(tick)
       } else {
+        glomRef.current?.flush()
         animRef.current = null
         setRunning(false)
         setPaletteCopy(new Float32Array(paletteRef.current))
@@ -256,16 +341,21 @@ export default function App() {
     animRef.current = requestAnimationFrame(tick)
   }, [imageData])
 
+  // Auto-restart when button-style params or image change while autoRun is on.
+  // Slider params (quality, blendDecay, radiusDecay) use onBlur instead (see triggerAutoRun).
+  useEffect(() => {
+    if (!autoRun || !imageData) return
+    startTraining()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.rows, params.cols, params.topology, params.gaussian, params.randomInit, params.maskColor, imageData, autoRun])
+
+  const triggerAutoRun = useCallback(() => {
+    if (autoRun && imageData) startTraining()
+  }, [autoRun, imageData, startTraining])
+
   // ─── Actions ───────────────────────────────────────────────────────────────
 
-  const handleSmooth = useCallback(() => {
-    const canvas = paletteCanvasRef.current
-    if (!canvas) return
-    const p = paramsRef.current
-    smoothPaletteCanvas(canvas, paletteRef.current, p.rows, p.cols, p.topology === 'toroidal')
-  }, [])
-
-  const handleExportPNG = useCallback(() => {
+const handleExportPNG = useCallback(() => {
     const canvas = paletteCanvasRef.current
     if (!canvas) return
     const link = document.createElement('a')
@@ -314,9 +404,7 @@ export default function App() {
     e.preventDefault()
     setDragging(false)
     const file = e.dataTransfer.files[0]
-    if (file?.type.startsWith('image/')) {
-      loadFromSrc(URL.createObjectURL(file))
-    }
+    if (file?.type.startsWith('image/')) loadFromSrc(URL.createObjectURL(file))
   }, [loadFromSrc])
 
   // ─── Derived ───────────────────────────────────────────────────────────────
@@ -333,45 +421,304 @@ export default function App() {
     <div style={{
       display: 'flex', flexDirection: 'column', gap: '16px',
       padding: '24px', height: '100vh',
+      background: T.bg,
+      transition: 'background 0.2s',
     }}>
 
       {/* Header */}
-      <div>
-        <h1 style={{ color: ACCENT, fontSize: '16px', letterSpacing: '0.12em', fontWeight: 'normal' }}>
-          SOM PALETTE EXTRACTOR
-        </h1>
-        <p style={{ color: MUTED, fontSize: '11px', marginTop: '4px' }}>
-          Self-Organizing Map · drop an image to begin
-        </p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <h1 style={{ color: T.accent, fontSize: '16px', letterSpacing: '0.12em', fontWeight: 'normal' }}>
+            SOM PALETTE EXTRACTOR
+          </h1>
+          <p style={{ color: T.muted, fontSize: '11px', marginTop: '4px' }}>
+            Self-Organizing Map · drop an image to begin
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
+          <button onClick={() => setShowInfo(true)} style={{ ...btn(T), padding: '5px 12px' }}>?</button>
+          <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px' }} title="Toggle light / dark">
+            {lightMode ? '◑ dark' : '◐ light'}
+          </button>
+        </div>
+      </div>
+
+      {/* Info modal */}
+      {showInfo && (
+        <div
+          onClick={() => setShowInfo(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 100,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '24px',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: T.panel, border: `1px solid ${T.border}`,
+              borderRadius: '12px', padding: '28px 32px',
+              maxWidth: '900px', width: '100%', maxHeight: '80vh',
+              overflowY: 'auto', color: T.text, fontSize: '13px', lineHeight: '1.6',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
+              <h2 style={{ color: T.accent, fontSize: '15px', fontWeight: 'normal', letterSpacing: '0.1em' }}>
+                SOM PALETTE EXTRACTOR
+              </h2>
+              <button onClick={() => setShowInfo(false)} style={{ ...btn(T), padding: '3px 10px', fontSize: '14px' }}>✕</button>
+            </div>
+
+            <p style={{ color: T.muted, marginBottom: '14px' }}>
+              A <strong style={{ color: T.text }}>Self-Organizing Map (SOM)</strong> is an unsupervised neural network
+              that performs non-linear dimensionality reduction while preserving the topological structure of its input.
+              A grid of nodes — each holding a weight vector in the input space — is trained by repeatedly
+              presenting random samples: the closest node (the Best Matching Unit) and its neighbours are nudged
+              toward each sample, with influence decaying over both distance and time.
+              The result is a low-dimensional map where proximity reflects similarity in the original high-dimensional space.
+            </p>
+            <p style={{ color: T.muted, marginBottom: '20px' }}>
+              Here, each node holds an RGB triplet and the input space is the set of pixel colors in an image.
+              Training causes the grid to fold and stretch through color space until it densely covers
+              the image's color distribution — brighter regions of the palette correspond to more frequently
+              sampled hues. The choice of topology controls how the grid's edges connect,
+              letting you extract palettes shaped as toruses, spheres, Möbius bands, and more,
+              each producing a different kind of color continuity across the grid.
+            </p>
+
+            {[
+              ['BASIC USAGE', [
+                ['Drop or upload an image', 'Drag onto the source canvas, or use the Upload button.'],
+                ['Set grid size', 'Rows × Cols controls how many palette colors are generated.'],
+                ['Choose a topology', 'Determines how the grid edges connect (see below).'],
+                ['Draw', 'Runs the SOM. Enable Auto to re-run whenever a setting changes.'],
+                ['Copy colors', 'Click any cell in the palette to copy its hex value to the clipboard.'],
+                ['Export', 'Save the palette as a PNG image or a GIMP-compatible .gpl file.'],
+              ]],
+              ['PARAMETERS', [
+                ['Iterations', 'Number of random pixel samples used to train the palette. More = higher quality, slower.'],
+                ['Blend Decay', 'How quickly the learning rate falls off. 0.5 = linear; lower = fast early drop; higher = slow early drop.'],
+                ['Radius Decay', 'Same curve applied to the neighbourhood radius — how far each update spreads from the winning cell.'],
+                ['Kernel', 'Hard: flat neighbourhood update — all cells within the radius update equally.\nGaussian: smooth falloff — influence decreases toward the radius boundary.'],
+                ['Init', 'Zero: all cells start as black.\nRandom: cells are seeded with random pixels sampled from the image.'],
+                ['Ignore Color', 'Pixels within tolerance of this color are skipped during sampling — useful for solid backgrounds or transparency.'],
+              ]],
+              ['TOPOLOGIES', [
+                ['Triangle', 'Bottom row collapses to a single point, like a slice through HSV color space.\nGood for palettes anchored to a single dark or neutral tone.'],
+                ['Bigon', 'Both top and bottom rows collapse to points, like a slice through HSL color space.\nGood for palettes with distinct dark and light poles and varied hues in between.'],
+                ['Rectangle', 'Open grid with no edge connections.\nGeneral-purpose flat palette or swatch grid.'],
+                ['Cylinder', 'Left and right edges connect, forming a tube.\nGood for palettes that cycle continuously through hue with no seam.'],
+                ['Möbius', 'Left and right edges connect with a half-twist — the surface has only one side.\nGood for palettes where opposite ends of the hue range blend into each other.'],
+                ['Klein', 'All edges connect; horizontal edges join with a half-twist. Non-orientable closed surface.\nGood for highly continuous color relationships with no privileged boundary.'],
+                ['Torus', 'All edges connect, wrapping in both directions.\nGood for seamlessly tileable texture palettes — both axes loop continuously.'],
+                ['Sphere', 'Full spherical surface mapped from the grid.\nGood for normal map palettes, where the layout aligns with the distribution of surface normals.'],
+                ['Projective', 'Sphere with antipodal identification — opposite points are treated as the same.\nGood for palettes where complementary colors should share the same region.'],
+              ]],
+              ['COLOR SPACE VIEWER', [
+                ['What it shows', 'Image pixels appear as a point cloud; palette cells appear as larger dots connected by grid lines showing the SOM\'s topology. Lets you see how well the trained palette covers the image\'s color distribution.'],
+                ['RGB', 'Linear RGB cube. Axes are red, green, and blue. Best for seeing raw color spread across the full gamut.'],
+                ['OKLab', 'Perceptually uniform space. L = lightness, a = green↔red, b = blue↔yellow. Distances reflect perceived color difference, so clusters here are perceptually meaningful.'],
+                ['OKLCh', 'Cylindrical form of OKLab. Height = lightness, radius = chroma, angle = hue. Good for seeing how saturated and how varied in hue the palette is.'],
+                ['HSV', 'Hue-Saturation-Value cylinder. Height = value, radius = saturation, angle = hue. Desaturated colors cluster on the central axis; dark colors at the bottom.'],
+                ['HSL', 'Hue-Saturation-Lightness double cone. Height = lightness, radius = saturation, angle = hue. Both dark and light colors converge on the axis.'],
+              ]],
+            ].map(([heading, rows]) => (
+              <div key={heading as string} style={{ marginBottom: '20px' }}>
+                <div style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em', marginBottom: '10px' }}>
+                  {heading as string}
+                </div>
+                {(rows as [string, string][]).map(([term, desc]) => (
+                  <div key={term} style={{ display: 'flex', gap: '12px', marginBottom: '7px' }}>
+                    <span style={{ color: T.accent, minWidth: '170px', flexShrink: 0, fontSize: '12px' }}>{term}</span>
+                    <span style={{ color: T.muted, whiteSpace: 'pre-line' }}>{desc}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Settings pane */}
+      <div style={{ background: T.panel, borderRadius: '10px', border: `1px solid ${T.border}`, transition: 'background 0.2s' }}>
+
+        {/* Always-visible row: action buttons + collapse toggle */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px' }}>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(T, !running, running)}>
+              {running ? '■ Stop' : '▶ Draw'}
+            </button>
+            <button onClick={() => setAutoRun(a => !a)} disabled={!imageData} style={btn(T, autoRun)}>
+              Auto
+            </button>
+          </div>
+          <button
+            onClick={() => setCollapsed(c => !c)}
+            style={{ ...btn(T), padding: '4px 10px', fontSize: '14px', lineHeight: 1 }}
+          >
+            {collapsed ? '▾' : '▴'}
+          </button>
+        </div>
+
+        {/* Collapsible body */}
+        {!collapsed && (
+          <div style={{ padding: '0 16px 16px', borderTop: `1px solid ${T.border}` }}>
+
+            {/* Grid size */}
+            <div style={{ marginTop: '14px' }}>
+              {(['rows', 'cols'] as const).map(axis => (
+                <div key={axis} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '11px', color: T.muted, width: '32px' }}>{axis.toUpperCase()}</span>
+                  {[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].map(n => (
+                    <button
+                      key={n}
+                      onClick={() => setParam(axis, n)}
+                      disabled={running}
+                      style={{ ...btn(T, params[axis] === n), fontSize: '11px', padding: '4px 10px' }}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            {/* Sliders */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+              gap: '14px 28px',
+              marginBottom: '16px',
+            }}>
+              <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} muted={T.muted} text={T.text} onChange={v => setParam('quality', v)} onRelease={triggerAutoRun} />
+              <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('blendDecay', v)} onRelease={triggerAutoRun} />
+              <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} muted={T.muted} text={T.text} onChange={v => setParam('radiusDecay', v)} onRelease={triggerAutoRun} />
+            </div>
+
+            {/* Toggles row */}
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+
+              {/* Mask toggle */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>KERNEL</span>
+                <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '6px', overflow: 'hidden' }}>
+                  {(['Hard', 'Gaussian'] as const).map(mode => {
+                    const active = (mode === 'Gaussian') === params.gaussian
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => setParam('gaussian', mode === 'Gaussian')}
+                        disabled={running}
+                        style={{
+                          padding: '6px 16px', border: 'none',
+                          cursor: running ? 'not-allowed' : 'pointer',
+                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                          color: active ? T.accent : T.muted,
+                          fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                        }}
+                      >
+                        {mode}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Init toggle */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>INIT</span>
+                <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '6px', overflow: 'hidden' }}>
+                  {(['Zero', 'Random'] as const).map(mode => {
+                    const active = (mode === 'Random') === params.randomInit
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => setParam('randomInit', mode === 'Random')}
+                        disabled={running}
+                        style={{
+                          padding: '6px 16px', border: 'none',
+                          cursor: running ? 'not-allowed' : 'pointer',
+                          background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
+                          color: active ? T.accent : T.muted,
+                          fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                        }}
+                      >
+                        {mode}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Ignore color */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>IGNORE COLOR</span>
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <label style={{ position: 'relative', cursor: 'pointer', flexShrink: 0 }}>
+                    <div style={{
+                      width: '32px', height: '32px', borderRadius: '6px',
+                      border: `1px solid ${params.maskColor ? T.accent : T.border}`,
+                      background: params.maskColor ?? `repeating-conic-gradient(${T.border} 0% 25%, transparent 0% 50%) 0 0 / 8px 8px`,
+                    }} />
+                    <input
+                      type="color"
+                      value={params.maskColor ?? '#ffffff'}
+                      style={{ position: 'absolute', opacity: 0, inset: 0, width: '100%', height: '100%', cursor: 'pointer' }}
+                      onChange={e => setParam('maskColor', e.target.value)}
+                    />
+                  </label>
+                  {params.maskColor && (
+                    <button onClick={() => setParam('maskColor', null)} style={{ ...btn(T), padding: '5px 10px' }}>Clear</button>
+                  )}
+                  {params.maskColor && (
+                    <div style={{ width: '120px' }}>
+                      <Slider label="Tolerance" value={params.maskTolerance} min={0} max={0.5} step={0.005}
+                        display={`${(params.maskTolerance * 100).toFixed(0)}%`}
+                        muted={T.muted} text={T.text}
+                        onChange={v => setParam('maskTolerance', v)} onRelease={triggerAutoRun} />
+                    </div>
+                  )}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Image + Palette row */}
-      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
+      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end' }}>
 
         {/* Source image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
-            <label style={{ ...btn(), cursor: 'pointer' }}>
-              Upload
-              <input
-                type="file"
-                accept="image/*"
-                style={{ display: 'none' }}
-                onChange={e => {
-                  const file = e.target.files?.[0]
-                  if (file) loadFromSrc(URL.createObjectURL(file))
-                  e.target.value = ''
-                }}
-              />
-            </label>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {imageData && <button onClick={clearImage} style={btn(T)}>Clear</button>}
+              <label style={{ ...btn(T), cursor: 'pointer' }}>
+                Upload
+                <input
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={e => {
+                    const file = e.target.files?.[0]
+                    if (file) loadFromSrc(URL.createObjectURL(file))
+                    e.target.value = ''
+                  }}
+                />
+              </label>
+            </div>
           </div>
           <div
             style={{
               position: 'relative', borderRadius: '10px', overflow: 'hidden',
-              border: `1px solid ${dragging ? ACCENT : BORDER}`,
+              border: `1px solid ${dragging ? T.accent : T.border}`,
               transition: 'border-color 0.15s', cursor: 'pointer',
               width: CANVAS_SIZE, height: CANVAS_SIZE,
+              background: T.panel,
             }}
             onDrop={handleDrop}
             onDragOver={e => { e.preventDefault(); setDragging(true) }}
@@ -382,7 +729,7 @@ export default function App() {
               <div style={{
                 position: 'absolute', inset: 0, display: 'flex',
                 alignItems: 'center', justifyContent: 'center',
-                background: 'rgba(0,10,30,0.75)', color: ACCENT,
+                background: 'rgba(0,10,30,0.75)', color: T.accent,
                 fontSize: '13px', letterSpacing: '0.1em',
               }}>
                 DROP IMAGE
@@ -393,11 +740,17 @@ export default function App() {
 
         {/* Palette canvas */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minWidth: 0 }}>
-          <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
+            <div style={{ display: 'flex', gap: '6px' }}>
+<button onClick={handleExportPNG} disabled={running} style={btn(T)}>Export PNG</button>
+              <button onClick={handleExportGPL} disabled={running} style={btn(T)}>Export GPL</button>
+            </div>
+          </div>
           <div style={{
             position: 'relative', borderRadius: '10px', overflow: 'hidden',
-            border: `1px solid ${BORDER}`,
-            background: '#050d1a',
+            border: `1px solid ${T.border}`,
+            background: lightMode ? '#c8dff0' : '#050d1a',
           }}>
             <canvas
               ref={paletteCanvasRef}
@@ -412,14 +765,13 @@ export default function App() {
               }}
               onClick={handlePaletteClick}
             />
-            {/* Copy toast */}
             {copiedHex && (
               <div style={{
                 position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
-                background: 'rgba(0,8,20,0.92)', border: `1px solid ${ACCENT}`,
+                background: lightMode ? 'rgba(220,234,248,0.95)' : 'rgba(0,8,20,0.92)', border: `1px solid ${T.accent}`,
                 borderRadius: '6px', padding: '5px 12px',
                 display: 'flex', alignItems: 'center', gap: '8px',
-                fontSize: '12px', color: TEXT, pointerEvents: 'none',
+                fontSize: '12px', color: T.text, pointerEvents: 'none',
               }}>
                 <span style={{
                   display: 'inline-block', width: '12px', height: '12px',
@@ -431,11 +783,11 @@ export default function App() {
             {running && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
-                background: 'rgba(0,8,20,0.85)', padding: '8px 12px',
+                background: lightMode ? 'rgba(220,234,248,0.92)' : 'rgba(0,8,20,0.85)', padding: '8px 12px',
               }}>
                 <div style={{
                   display: 'flex', justifyContent: 'space-between',
-                  fontSize: '10px', color: MUTED, marginBottom: '5px',
+                  fontSize: '10px', color: T.muted, marginBottom: '5px',
                 }}>
                   <span>training</span>
                   <span>{Math.round(progress * 100)}%</span>
@@ -443,7 +795,7 @@ export default function App() {
                 <div style={{ height: '3px', background: 'rgba(50,100,200,0.2)', borderRadius: '2px' }}>
                   <div style={{
                     height: '100%', width: `${progress * 100}%`,
-                    background: ACCENT, borderRadius: '2px',
+                    background: T.accent, borderRadius: '2px',
                     transition: 'width 0.05s linear',
                   }} />
                 </div>
@@ -454,183 +806,149 @@ export default function App() {
 
       </div>
 
-      {/* 3D views + floating controls */}
-      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
-        <div style={{ display: 'flex', gap: '8px', width: '100%', height: '100%' }}>
+      {/* 3D views */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px' }}>
 
-          {/* RGB cube — always shown */}
-          <div style={{
-            flex: 1, borderRadius: '10px', overflow: 'hidden',
-            border: `1px solid ${BORDER}`, background: '#030810',
-          }}>
-            <Canvas
-              camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
-              style={{ width: '100%', height: '100%' }}
-              gl={{ antialias: true }}
-            >
-              <ColorCube
-                imageData={imageData}
-                palette={paletteCopy}
-                rows={params.rows}
-                cols={params.cols}
-              />
-            </Canvas>
-          </div>
-
-          {/* Topology 3D view — shown for non-rectangular topologies */}
-          {params.topology !== 'rectangular' && (
-            <div style={{
-              flex: 1, borderRadius: '10px', overflow: 'hidden',
-              border: `1px solid ${BORDER}`, background: '#030810',
-            }}>
-              <Canvas
-                camera={{ position: [0, 0, 1.5], fov: 45 }}
-                style={{ width: '100%', height: '100%' }}
-                gl={{ antialias: true }}
-              >
-                <TopologyScene
-                  topology={params.topology}
-                  paletteCanvasRef={paletteCanvasRef}
-                />
-              </Canvas>
-            </div>
-          )}
-
-        </div>
-
-        {/* Floating controls */}
+        {/* RGB cube — always shown */}
         <div style={{
-          position: 'absolute', top: 12, left: 12,
-          background: PANEL, borderRadius: '10px', padding: '16px',
-          border: `1px solid ${BORDER}`, backdropFilter: 'blur(8px)',
+          flex: 1, borderRadius: '10px', overflow: 'hidden',
+          border: `1px solid ${T.border}`,
+          background: T.canvas3d,
+          display: 'flex', flexDirection: 'column',
         }}>
-
-          {/* Grid size */}
-          {(['rows', 'cols'] as const).map(axis => (
-            <div key={axis} style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '11px', color: MUTED, width: '32px' }}>{axis.toUpperCase()}</span>
-              {[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].map(n => (
-                <button
-                  key={n}
-                  onClick={() => setParam(axis, n)}
-                  disabled={running}
-                  style={{ ...btn(params[axis] === n), fontSize: '11px', padding: '4px 10px' }}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-          ))}
-
-          {/* Sliders */}
+          {/* Header */}
           <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-            gap: '14px 28px',
-            marginBottom: '16px',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '6px 10px', borderBottom: `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0,
           }}>
-            <Slider label="Iterations" value={params.quality} min={0} max={10} step={0.1} disabled={running} display={totalIter.toLocaleString()} onChange={v => setParam('quality', v)} />
-            <Slider label="Blend Decay" value={params.blendDecay} min={0} max={1} step={0.01} disabled={running} display={params.blendDecay === 0.5 ? '0.50 (linear)' : params.blendDecay.toFixed(2)} onChange={v => setParam('blendDecay', v)} />
-            <Slider label="Radius Decay" value={params.radiusDecay} min={0} max={1} step={0.01} disabled={running} display={params.radiusDecay === 0.5 ? '0.50 (linear)' : params.radiusDecay.toFixed(2)} onChange={v => setParam('radiusDecay', v)} />
-          </div>
-
-          {/* Controls + actions */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-
-            {/* Topology toggle */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>TOPOLOGY</span>
-            <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-              {(['Rectangular', 'Cylindrical', 'Toroidal', 'Spherical'] as const).map(mode => {
-                const active = params.topology === mode.toLowerCase()
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>COLOR SPACE</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              {(['rgb', 'oklab', 'oklch', 'hsv', 'hsl'] as VizSpace[]).map(space => {
+                const [x, y, z] = VIZ_AXES[space]
+                const active = vizSpace === space
                 return (
                   <button
-                    key={mode}
-                    onClick={() => setParam('topology', mode.toLowerCase() as Params['topology'])}
-                    disabled={running}
+                    key={space}
+                    onClick={() => setVizSpace(space)}
                     style={{
-                      padding: '6px 16px', border: 'none',
-                      cursor: running ? 'not-allowed' : 'pointer',
-                      background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                      color: active ? ACCENT : MUTED,
-                      fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                      padding: '3px 8px', borderRadius: '4px',
+                      border: `1px solid ${active ? T.accent : T.border}`,
+                      background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                      color: active ? T.accent : T.muted,
+                      fontFamily: 'inherit', fontSize: '10px',
+                      cursor: 'pointer', letterSpacing: '0.05em',
                     }}
+                    title={`${x} · ${y} · ${z}`}
                   >
-                    {mode}
+                    {space.toUpperCase()}
                   </button>
                 )
               })}
-            </div>
-            </div>
-
-            {/* Neighbourhood toggle */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>MASK</span>
-            <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-              {(['Hard', 'Gaussian'] as const).map(mode => {
-                const active = (mode === 'Gaussian') === params.gaussian
-                return (
-                  <button
-                    key={mode}
-                    onClick={() => setParam('gaussian', mode === 'Gaussian')}
-                    disabled={running}
-                    style={{
-                      padding: '6px 16px', border: 'none',
-                      cursor: running ? 'not-allowed' : 'pointer',
-                      background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                      color: active ? ACCENT : MUTED,
-                      fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
-                    }}
-                  >
-                    {mode}
-                  </button>
-                )
-              })}
-            </div>
-            </div>
-
-            {/* Init toggle */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <span style={{ fontSize: '10px', color: MUTED, letterSpacing: '0.15em' }}>INIT</span>
-              <div style={{ display: 'flex', border: `1px solid ${BORDER}`, borderRadius: '6px', overflow: 'hidden' }}>
-                {(['Zero', 'Random'] as const).map(mode => {
-                  const active = (mode === 'Random') === params.randomInit
+              <div style={{ width: '1px', height: '14px', background: T.border, margin: '0 2px' }} />
+              <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden' }}>
+                {([false, true] as const).map(val => {
+                  const active = compress === val
                   return (
                     <button
-                      key={mode}
-                      onClick={() => setParam('randomInit', mode === 'Random')}
-                      disabled={running}
+                      key={String(val)}
+                      onClick={() => setCompress(val)}
                       style={{
-                        padding: '6px 16px', border: 'none',
-                        cursor: running ? 'not-allowed' : 'pointer',
-                        background: active ? 'rgba(50,100,200,0.25)' : 'transparent',
-                        color: active ? ACCENT : MUTED,
-                        fontFamily: 'inherit', fontSize: '12px', transition: 'all 0.15s',
+                        padding: '3px 8px', border: 'none',
+                        background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                        color: active ? T.accent : T.muted,
+                        fontFamily: 'inherit', fontSize: '10px',
+                        cursor: 'pointer', letterSpacing: '0.05em',
                       }}
                     >
-                      {mode}
+                      {val ? 'Compressed' : 'True Color'}
                     </button>
                   )
                 })}
               </div>
             </div>
-
           </div>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(!running, running)}>
-              {running ? '■ Stop' : '▶ Draw'}
-            </button>
-            <button onClick={handleSmooth} disabled={running} style={btn()}>Smooth</button>
-            <button onClick={handleExportPNG} disabled={running} style={btn()}>Export PNG</button>
-            <button onClick={handleExportGPL} disabled={running} style={btn()}>Export GPL</button>
-          </div>
-          </div>
+          <Canvas
+            camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
+            style={{ flex: 1 }}
+            gl={{ antialias: true }}
+          >
+            <ColorCube
+              imageData={imageData}
+              palette={paletteCopy}
+              rows={params.rows}
+              cols={params.cols}
+              vizSpace={vizSpace}
+              lightMode={lightMode}
+              compress={compress}
+              topology={params.topology}
+            />
+          </Canvas>
         </div>
 
-        <span style={{ position: 'absolute', bottom: 10, left: 0, right: 0, fontSize: '10px', color: MUTED, opacity: 0.4, textAlign: 'center', pointerEvents: 'none' }}>
-          drag to orbit · scroll to zoom · ctrl+drag to pan
-        </span>
+        {/* Topology 3D view — always shown */}
+        <div style={{
+          flex: 1, borderRadius: '10px', overflow: 'hidden',
+          border: `1px solid ${T.border}`,
+          background: T.canvas3d,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          {/* Header */}
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+            padding: '6px 10px', borderBottom: `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0,
+          }}>
+            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em', paddingTop: '4px' }}>TOPOLOGY</span>
+            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden', maxWidth: '80%' }}>
+              {([
+                ['cone', 'Triangle'],
+                ['bicone', 'Bigon'],
+                ['rectangular', 'Rectangle'],
+                ['cylindrical', 'Cylinder'], 
+                ['mobius', 'Möbius'],
+                ['klein', 'Klein'],
+                ['toroidal', 'Torus'], 
+                ['spherical', 'Sphere'], 
+                ['projective', 'Projective'],
+              ] as const).map(([value, label]) => {
+                const active = params.topology === value
+                return (
+                  <button
+                    key={value}
+                    onClick={() => setParam('topology', value as Params['topology'])}
+                    disabled={running}
+                    style={{
+                      padding: '3px 8px', border: 'none',
+                      cursor: running ? 'not-allowed' : 'pointer',
+                      background: active ? 'rgba(50,100,200,0.2)' : 'transparent',
+                      color: active ? T.accent : T.muted,
+                      fontFamily: 'inherit', fontSize: '10px', transition: 'all 0.15s',
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <Canvas
+            camera={{ position: [0, 0, 1.5], fov: 45 }}
+            style={{ flex: 1 }}
+            gl={{ antialias: true }}
+          >
+            <TopologyScene
+              paletteCanvasRef={paletteCanvasRef}
+              lightModeRef={lightModeRef}
+              topologyRef={topologyRef}
+              paletteReadyRef={paletteReadyRef}
+              rowsRef={rowsRef}
+              colsRef={colsRef}
+            />
+          </Canvas>
+        </div>
+
       </div>
 
     </div>

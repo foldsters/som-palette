@@ -21,7 +21,7 @@ uniform vec2 u_bmu;       // BMU grid position in GPU coords (y=0 at bottom)
 uniform vec3 u_color;     // sampled pixel RGB [0,1]
 uniform float u_blend;
 uniform float u_radius;   // neighbourhood radius in grid cells
-uniform int u_topology;  // 0=rectangular 1=cylindrical 2=toroidal 3=spherical
+uniform int u_topology;  // 0=rectangular 1=cylindrical 2=toroidal 3=spherical 4=hexagonal 5=projective 6=mobius 7=klein 8=cone 9=bicone
 uniform bool u_gaussian;
 
 #define PI 3.14159265358979
@@ -45,6 +45,53 @@ void main() {
   float d;
   if (u_topology == 3) {
     d = sphereDist(gridPos, u_bmu, u_size);
+  } else if (u_topology == 5) {
+    // RP²: real projective plane — identify antipodal points
+    float d1 = sphereDist(gridPos, u_bmu, u_size);
+    // Antipodal BMU: theta += π (x + size.x/2 mod size.x), phi → π-phi (y → size.y - y)
+    vec2 anti_bmu = vec2(mod(u_bmu.x + u_size.x * 0.5, u_size.x), u_size.y - u_bmu.y);
+    float d2 = sphereDist(gridPos, anti_bmu, u_size);
+    d = min(d1, d2);
+  } else if (u_topology == 4) {
+    // Hexagonal: odd CPU-rows (= odd GPU-rows when flipped) offset by 0.5 in x.
+    // u_bmu.x already includes the BMU's own hex offset (added on CPU side).
+    float cpuRow = u_size.y - 1.0 - gridPos.y;
+    float ox = mod(cpuRow, 2.0) >= 1.0 ? 0.5 : 0.0;
+    float dx = (gridPos.x + ox) - u_bmu.x;
+    float dy = (gridPos.y - u_bmu.y) * 0.8660254; // sqrt(3)/2
+    d = length(vec2(dx, dy));
+  } else if (u_topology == 8) {
+    // Cone: CPU bottom row (GPU y=0) is a point — distance can route through it
+    float d_direct = length(gridPos - u_bmu);
+    float d_pole   = gridPos.y + u_bmu.y;   // distance to GPU bottom (=CPU bottom) and back
+    d = min(d_direct, d_pole);
+  } else if (u_topology == 9) {
+    // Bicone: CPU top (GPU y=rows-1) and CPU bottom (GPU y=0) are both points
+    float d_direct = length(gridPos - u_bmu);
+    float d_bottom = gridPos.y + u_bmu.y;
+    float d_top    = (u_size.y - 1.0 - gridPos.y) + (u_size.y - 1.0 - u_bmu.y);
+    d = min(d_direct, min(d_bottom, d_top));
+  } else if (u_topology == 6) {
+    // Möbius band: horizontal wraps with row flip, vertical is open
+    float flipRow = u_size.y - 1.0 - u_bmu.y;
+    float d0 = length(gridPos - u_bmu);
+    float d1 = length(vec2(gridPos.x - (u_bmu.x + u_size.x), gridPos.y - flipRow));
+    float d2 = length(vec2(gridPos.x - (u_bmu.x - u_size.x), gridPos.y - flipRow));
+    d = min(d0, min(d1, d2));
+  } else if (u_topology == 7) {
+    // Klein bottle: vertical wraps same, horizontal wraps with row flip (odd wraps)
+    float flipRow = u_size.y - 1.0 - u_bmu.y;
+    float best = 1e9;
+    // n in {-1,0,1}: odd n → flip row; m in {-1,0,1}: vertical wrap
+    for (int n = -1; n <= 1; n++) {
+      float er = (n == 0) ? u_bmu.y : flipRow;  // n=±1 are odd → flip
+      for (int m = -1; m <= 1; m++) {
+        float dy = gridPos.y - (er + float(m) * u_size.y);
+        float dx = gridPos.x - (u_bmu.x + float(n) * u_size.x);
+        best = min(best, dx*dx + dy*dy);
+      }
+    }
+    d = sqrt(best);
   } else {
     vec2 diff = gridPos - u_bmu;
     if (u_topology == 2) {
@@ -132,9 +179,11 @@ export class GLSOM {
   private rows = 0
   private cols = 0
   private readBuf: Float32Array = new Float32Array(0)  // RGBA readback scratch
+  private pbo: WebGLBuffer | null = null               // async pixel pack buffer
+  private pboFilled = false                            // true when PBO holds unread data
 
   // CPU mirror of palette in top-to-bottom row order (matches 2D canvas rendering).
-  // Updated from GPU at the end of every runBatch call.
+  // Updated from GPU at the start of each runBatch (one batch latency — fine for SOM).
   readonly mirror: Float32Array[] = []   // re-assigned on init
   cpuMirror: Float32Array = new Float32Array(0)
 
@@ -186,6 +235,7 @@ export class GLSOM {
     this.cols = cols
     this.cpuMirror = new Float32Array(rows * cols * 3)
     this.readBuf   = new Float32Array(rows * cols * 4)
+    this.pboFilled = false
 
     const zeros = new Float32Array(rows * cols * 4)
     for (let i = 0; i < 2; i++) {
@@ -193,6 +243,13 @@ export class GLSOM {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, cols, rows, 0, gl.RGBA, gl.FLOAT, zeros)
     }
     gl.bindTexture(gl.TEXTURE_2D, null)
+
+    // (Re)allocate PBO sized for the palette readback
+    if (!this.pbo) this.pbo = gl.createBuffer()!
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo)
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, rows * cols * 4 * 4, gl.STREAM_READ)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+
     this.current = 0
   }
 
@@ -215,10 +272,37 @@ export class GLSOM {
     this.current = 0
   }
 
+  /** Copy the pending PBO readback into cpuMirror (blocks if GPU isn't done yet). */
+  private syncPBO(): void {
+    const gl = this.gl
+    const { rows, cols } = this
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo!)
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, this.readBuf)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+    this.pboFilled = false
+    const mirror = this.cpuMirror
+    for (let row = 0; row < rows; row++) {
+      const gpuRow = rows - 1 - row
+      for (let col = 0; col < cols; col++) {
+        const src = (gpuRow * cols + col) * 4
+        const dst = (row    * cols + col) * 3
+        mirror[dst]     = this.readBuf[src]
+        mirror[dst + 1] = this.readBuf[src + 1]
+        mirror[dst + 2] = this.readBuf[src + 2]
+      }
+    }
+  }
+
+  /** Flush any pending async readback — call after the final batch. */
+  flush(): void {
+    if (this.pboFilled) this.syncPBO()
+  }
+
   /**
    * Run fromIter..toIter SOM iterations on the GPU.
-   * CPU mirror is used for BMU search (stale by up to one batch — fine for SOM).
-   * Mirror is synced from GPU at the end of each call.
+   * CPU mirror is used for BMU search (stale by one batch — fine for SOM).
+   * Readback is async via PBO: previous batch's result is synced at the start,
+   * and this batch's result is issued at the end for the next batch to pick up.
    */
   runBatch(
     imageData: ImageData,
@@ -227,16 +311,21 @@ export class GLSOM {
     totalIter: number,
     blendDecay: number,
     radiusDecay: number,
-    topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical',
+    topology: 'rectangular' | 'cylindrical' | 'toroidal' | 'spherical' | 'hexagonal' | 'projective' | 'mobius' | 'klein' | 'cone' | 'bicone',
     gaussian: boolean,
+    maskRGB: [number, number, number] | null = null,
+    maskTolSq: number = 0,
   ): void {
     const { rows, cols } = this
-    const diagonal = topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
+    const diagonal = topology === 'projective' ? Math.PI / 2 : topology === 'spherical' ? Math.PI : Math.sqrt(rows * rows + cols * cols)
     const totalPixels = imageData.width * imageData.height
     const gl          = this.gl
     const mirror      = this.cpuMirror
     const blendExp    = Math.pow(10, 2 * blendDecay - 1)
     const radiusExp   = Math.pow(10, 2 * radiusDecay - 1)
+
+    // Sync the previous batch's async readback before using cpuMirror for BMU search
+    if (this.pboFilled) this.syncPBO()
 
     gl.useProgram(this.prog)
     gl.bindVertexArray(this.vao)
@@ -250,12 +339,17 @@ export class GLSOM {
       const blend    = 1.0 + (0.01 - 1.0) * tBlend
       const radius   = (1.0 + (0.01 - 1.0) * tRadius) * diagonal
 
-      // Sample random pixel from image
-      const pi = Math.floor(Math.random() * totalPixels) * 4
-      const rr = imageData.data[pi]     / 255
-      const rg = imageData.data[pi + 1] / 255
-      const rb = imageData.data[pi + 2] / 255
-      const [r, g, b] = [rr, rg, rb]
+      // Sample random pixel, skipping masked colors (up to 20 attempts)
+      let r = 0, g = 0, b = 0
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const pi = Math.floor(Math.random() * totalPixels) * 4
+        r = imageData.data[pi]     / 255
+        g = imageData.data[pi + 1] / 255
+        b = imageData.data[pi + 2] / 255
+        if (!maskRGB) break
+        const dr = r - maskRGB[0], dg = g - maskRGB[1], db = b - maskRGB[2]
+        if (dr * dr + dg * dg + db * db > maskTolSq) break
+      }
 
       // BMU search on CPU mirror (top-to-bottom row order)
       let minDist = Infinity, bmuCol = 0, bmuRow = 0
@@ -279,36 +373,36 @@ export class GLSOM {
       gl.bindTexture(gl.TEXTURE_2D, this.textures[src])
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbos[dst])
 
-      // Convert BMU row from CPU order (top=0) to GPU order (bottom=0)
-      gl.uniform2f(this.uBMU, bmuCol, rows - 1 - bmuRow)
+      // Convert BMU row from CPU order (top=0) to GPU order (bottom=0).
+      // For hex: pre-apply the CPU-row-based x-offset so the shader stays consistent.
+      const bmuX = topology === 'hexagonal' ? bmuCol + (bmuRow % 2) * 0.5 : bmuCol
+      gl.uniform2f(this.uBMU, bmuX, rows - 1 - bmuRow)
       gl.uniform3f(this.uColor, r, g, b)
       gl.uniform1f(this.uBlend, blend)
       gl.uniform1f(this.uRadius, radius)
       gl.uniform1i(this.uTopology,
         topology === 'rectangular'  ? 0 :
         topology === 'cylindrical'  ? 1 :
-        topology === 'toroidal'     ? 2 : 3)
+        topology === 'toroidal'     ? 2 :
+        topology === 'hexagonal'    ? 4 :
+        topology === 'projective'   ? 5 :
+        topology === 'mobius'       ? 6 :
+        topology === 'klein'        ? 7 :
+        topology === 'cone'         ? 8 :
+        topology === 'bicone'       ? 9 : 3)
       gl.uniform1i(this.uGaussian, gaussian ? 1 : 0)
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
       this.current = dst
     }
 
-    // Sync CPU mirror from GPU (readPixels returns bottom-to-top)
+    // Issue async readback into PBO — GPU writes DMA, no CPU stall
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbos[this.current])
-    gl.readPixels(0, 0, cols, rows, gl.RGBA, gl.FLOAT, this.readBuf)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo!)
+    gl.readPixels(0, 0, cols, rows, gl.RGBA, gl.FLOAT, 0)
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
-
-    for (let row = 0; row < rows; row++) {
-      const gpuRow = rows - 1 - row   // flip: GPU bottom-row → CPU top-row
-      for (let col = 0; col < cols; col++) {
-        const src = (gpuRow * cols + col) * 4
-        const dst = (row    * cols + col) * 3
-        mirror[dst]     = this.readBuf[src]
-        mirror[dst + 1] = this.readBuf[src + 1]
-        mirror[dst + 2] = this.readBuf[src + 2]
-      }
-    }
+    this.pboFilled = true
 
     gl.bindVertexArray(null)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -320,5 +414,6 @@ export class GLSOM {
     gl.deleteVertexArray(this.vao)
     this.textures.forEach(t => gl.deleteTexture(t))
     this.fbos.forEach(f => gl.deleteFramebuffer(f))
+    if (this.pbo) gl.deleteBuffer(this.pbo)
   }
 }
