@@ -105,6 +105,14 @@ export default function App() {
   const [dragging, setDragging]       = useState(false)
   const [copiedHex, setCopiedHex]     = useState<string | null>(null)
   const [collapsed, setCollapsed]           = useState(false)
+  const [veryNarrow, setVeryNarrow]         = useState(() => window.innerWidth < 400)
+  useEffect(() => {
+    const handler = () => setVeryNarrow(window.innerWidth < 400)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
+  const cardMinWidth = veryNarrow ? 250 : 276
+  const card3dMinWidth = veryNarrow ? 250 : 280
   const [sourceCollapsed, setSourceCollapsed]         = useState(false)
   const [paletteCollapsed, setPaletteCollapsed]       = useState(false)
   const [colorSpaceCollapsed, setColorSpaceCollapsed] = useState(false)
@@ -413,7 +421,7 @@ const handleExportPNG = useCallback(() => {
     }}>
 
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' }}>
         <div>
           <h1 style={{ color: T.accent, fontSize: '16px', letterSpacing: '0.12em', fontWeight: 'normal' }}>
             SOM PALETTE EXTRACTOR
@@ -422,14 +430,15 @@ const handleExportPNG = useCallback(() => {
             Self-Organizing Map · drop an image to begin
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
-          <button onClick={() => setShowInfo(true)} style={{ ...btn(T), padding: '5px 12px' }}>?</button>
-          <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px' }} title="Toggle light / dark">
-            {lightMode ? '◑ dark' : '◐ light'}
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          
+          <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px', fontSize: '24px' }} title="Toggle light / dark">
+            {lightMode ? '◑' : '◐'}
           </button>
-          <button onClick={() => setChromaMode(m => !m)} style={{ ...btn(T, chromaMode), padding: '5px 12px' }} title="Use palette corner colors to tint the UI">
-            ✦ chroma
+          <button onClick={() => setChromaMode(m => !m)} style={{ ...btn(T, chromaMode), padding: '5px 12px', fontSize: '24px' }} title="Use palette corner colors to tint the UI">
+            ✦
           </button>
+          <button onClick={() => setShowInfo(true)} style={{ ...btn(T), padding: '5px 12px', fontSize: '24px' }}>?</button>
         </div>
       </div>
 
@@ -698,7 +707,7 @@ const handleExportPNG = useCallback(() => {
 
         {/* Source image */}
         <div style={{
-          display: 'flex', flexDirection: 'column', flex: 1, minWidth: 276, width: '100%', maxWidth: CANVAS_SIZE,
+          display: 'flex', flexDirection: 'column', flex: 1, minWidth: cardMinWidth, width: '100%', maxWidth: CANVAS_SIZE,
           borderRadius: '10px', overflow: 'hidden',
           border: `1px solid ${dragging ? T.accent : T.border}`,
           transition: 'border-color 0.15s',
@@ -753,7 +762,7 @@ const handleExportPNG = useCallback(() => {
 
         {/* Palette canvas */}
         <div style={{
-          display: 'flex', flexDirection: 'column', flex: 1, minWidth: 276, width: '100%',
+          display: 'flex', flexDirection: 'column', flex: 1, minWidth: cardMinWidth, width: '100%',
           borderRadius: '10px', overflow: 'hidden',
           border: `1px solid ${T.border}`,
         }}>
@@ -834,7 +843,7 @@ const handleExportPNG = useCallback(() => {
 
         {/* RGB cube — always shown */}
         <div style={{
-          flex: 1, minWidth: 280, minHeight: colorSpaceCollapsed ? 0 : CANVAS_SIZE, borderRadius: '10px', overflow: 'hidden',
+          flex: 1, minWidth: card3dMinWidth, minHeight: colorSpaceCollapsed ? 0 : CANVAS_SIZE, borderRadius: '10px', overflow: 'hidden',
           border: `1px solid ${T.border}`,
           background: T.canvas3d,
           display: 'flex', flexDirection: 'column',
@@ -891,7 +900,7 @@ const handleExportPNG = useCallback(() => {
                       cursor: 'pointer', letterSpacing: '0.05em',
                     }}
                   >
-                    {val ? 'Compressed' : 'True Color'}
+                    {val ? 'Contrast' : 'True Color'}
                   </button>
                 )
               })}
@@ -917,7 +926,7 @@ const handleExportPNG = useCallback(() => {
 
         {/* Topology 3D view — always shown */}
         <div style={{
-          flex: 1, minWidth: 280, minHeight: topologyCollapsed ? 0 : CANVAS_SIZE, borderRadius: '10px', overflow: 'hidden',
+          flex: 1, minWidth: card3dMinWidth, minHeight: topologyCollapsed ? 0 : CANVAS_SIZE, borderRadius: '10px', overflow: 'hidden',
           border: `1px solid ${T.border}`,
           background: T.canvas3d,
           display: 'flex', flexDirection: 'column',
