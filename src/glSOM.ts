@@ -185,7 +185,7 @@ export class GLSOM {
   // CPU mirror of palette in top-to-bottom row order (matches 2D canvas rendering).
   // Updated from GPU at the start of each runBatch (one batch latency — fine for SOM).
   readonly mirror: Float32Array[] = []   // re-assigned on init
-  cpuMirror: Float32Array = new Float32Array(0)
+  cpuMirror: Float32Array<ArrayBuffer> = new Float32Array(0)
 
   private uSize: WebGLUniformLocation
   private uBMU: WebGLUniformLocation
