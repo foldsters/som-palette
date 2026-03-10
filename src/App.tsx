@@ -450,7 +450,11 @@ const handleExportPNG = useCallback(() => {
             </div>
 
             <p style={{ color: T.muted, marginBottom: '14px' }}>
-              A <strong style={{ color: T.text }}>Self-Organizing Map (SOM)</strong> is an unsupervised neural network
+              A{' '}
+              <a href="https://en.wikipedia.org/wiki/Self-organizing_map" target="_blank" rel="noopener noreferrer" style={{ color: T.accent, textDecoration: 'none' }}>
+                <strong style={{ color: T.accent }}>Self-Organizing Map (SOM)</strong>
+              </a>
+              {' '}is an unsupervised neural network
               that performs non-linear dimensionality reduction while preserving the topological structure of its input.
               A grid of nodes — each holding a weight vector in the input space — is trained by repeatedly
               presenting random samples: the closest node (the Best Matching Unit) and its neighbours are nudged
