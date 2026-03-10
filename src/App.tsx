@@ -104,14 +104,27 @@ export default function App() {
   const [autoRun, setAutoRun]               = useState(false)
   const [dragging, setDragging]       = useState(false)
   const [copiedHex, setCopiedHex]     = useState<string | null>(null)
-  const [collapsed, setCollapsed]     = useState(false)
+  const [collapsed, setCollapsed]           = useState(false)
+  const [sourceCollapsed, setSourceCollapsed]         = useState(false)
+  const [paletteCollapsed, setPaletteCollapsed]       = useState(false)
+  const [colorSpaceCollapsed, setColorSpaceCollapsed] = useState(false)
+  const [topologyCollapsed, setTopologyCollapsed]     = useState(false)
   const [vizSpace, setVizSpace]       = useState<VizSpace>('rgb')
   const [lightMode, setLightMode]     = useState(false)
-  const [chromaMode, setChromaMode]   = useState(true)
+  const [chromaMode, setChromaMode]   = useState(false)
   const [compress, setCompress]       = useState(false)
   const [showInfo, setShowInfo]       = useState(false)
 
   const T = deriveTheme(chromaMode ? paletteCorners : null, lightMode)
+
+  useEffect(() => {
+    document.documentElement.style.background = T.bg
+    document.body.style.background = T.bg
+    document.documentElement.style.setProperty('--accent', T.accent)
+    document.documentElement.style.setProperty('--muted', T.muted)
+    document.documentElement.style.setProperty('--border', T.border)
+    document.documentElement.style.setProperty('--bg', T.bg)
+  }, [T.bg, T.accent, T.muted, T.border])
 
   const paletteCanvasRef = useRef<HTMLCanvasElement>(null)
   const imageCanvasRef   = useRef<HTMLCanvasElement>(null)
@@ -393,11 +406,10 @@ const handleExportPNG = useCallback(() => {
   // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
+    <div style={{ height: '100vh', overflowY: 'auto', background: T.bg, transition: 'background 0.2s' }}>
     <div style={{
       display: 'flex', flexDirection: 'column', gap: '16px',
-      padding: '24px', height: '100vh',
-      background: T.bg,
-      transition: 'background 0.2s',
+      padding: '24px', minHeight: '100%',
     }}>
 
       {/* Header */}
@@ -435,6 +447,7 @@ const handleExportPNG = useCallback(() => {
           <div
             onClick={e => e.stopPropagation()}
             style={{
+              position: 'relative',
               background: T.panel, border: `1px solid ${T.border}`,
               borderRadius: '12px', padding: '28px 32px',
               maxWidth: '900px', width: '100%', maxHeight: '80vh',
@@ -442,12 +455,10 @@ const handleExportPNG = useCallback(() => {
               backdropFilter: 'blur(8px)',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
-              <h2 style={{ color: T.accent, fontSize: '15px', fontWeight: 'normal', letterSpacing: '0.1em' }}>
-                SOM PALETTE EXTRACTOR
-              </h2>
-              <button onClick={() => setShowInfo(false)} style={{ ...btn(T), padding: '3px 10px', fontSize: '14px' }}>✕</button>
-            </div>
+            <button onClick={() => setShowInfo(false)} style={{ ...btn(T), position: 'absolute', top: '16px', right: '16px', padding: '3px 10px', fontSize: '14px' }}>✕</button>
+            <h2 style={{ color: T.accent, fontSize: '15px', fontWeight: 'normal', letterSpacing: '0.1em', marginBottom: '20px', paddingRight: '40px' }}>
+              SOM PALETTE EXTRACTOR
+            </h2>
 
             <p style={{ color: T.muted, marginBottom: '14px' }}>
               A{' '}
@@ -512,9 +523,9 @@ const handleExportPNG = useCallback(() => {
                   {heading as string}
                 </div>
                 {(rows as [string, string][]).map(([term, desc]) => (
-                  <div key={term} style={{ display: 'flex', gap: '12px', marginBottom: '7px' }}>
+                  <div key={term} style={{ display: 'flex', gap: '12px', marginBottom: '7px', flexWrap: 'wrap' }}>
                     <span style={{ color: T.accent, minWidth: '170px', flexShrink: 0, fontSize: '12px' }}>{term}</span>
-                    <span style={{ color: T.muted, whiteSpace: 'pre-line' }}>{desc}</span>
+                    <span style={{ color: T.muted, whiteSpace: 'pre-line', flex: 1, minWidth: '180px' }}>{desc}</span>
                   </div>
                 ))}
               </div>
@@ -536,10 +547,10 @@ const handleExportPNG = useCallback(() => {
       )}
 
       {/* Settings pane */}
-      <div style={{ background: T.panel, borderRadius: '10px', border: `1px solid ${T.border}`, transition: 'background 0.2s' }}>
+      <div style={{ background: T.panel, borderRadius: '10px', border: `1px solid ${T.border}`, transition: 'background 0.2s', position: 'sticky', top: 24, zIndex: 10 }}>
 
         {/* Always-visible row: action buttons + collapse toggle */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px' }}>
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
             <button onClick={running ? stopTraining : startTraining} disabled={!imageData} style={btn(T, !running, running)}>
               {running ? '■ Stop' : '▶ Draw'}
@@ -683,12 +694,26 @@ const handleExportPNG = useCallback(() => {
       </div>
 
       {/* Image + Palette row */}
-      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end' }}>
+      <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
 
         {/* Source image */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
+        <div style={{
+          display: 'flex', flexDirection: 'column', flex: 1, minWidth: 276, width: '100%', maxWidth: CANVAS_SIZE,
+          borderRadius: '10px', overflow: 'hidden',
+          border: `1px solid ${dragging ? T.accent : T.border}`,
+          transition: 'border-color 0.15s',
+        }}>
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: '6px',
+            padding: '10px', borderBottom: sourceCollapsed ? 'none' : `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>SOURCE IMAGE</span>
+              <button onClick={() => setSourceCollapsed(c => !c)} style={{ ...btn(T), padding: '4px 10px', fontSize: '14px', lineHeight: 1, flexShrink: 0 }}>
+                {sourceCollapsed ? '▾' : '▴'}
+              </button>
+            </div>
             <div style={{ display: 'flex', gap: '6px' }}>
               {imageData && <button onClick={clearImage} style={btn(T)}>Clear</button>}
               <label style={{ ...btn(T), cursor: 'pointer' }}>
@@ -707,18 +732,12 @@ const handleExportPNG = useCallback(() => {
             </div>
           </div>
           <div
-            style={{
-              position: 'relative', borderRadius: '10px', overflow: 'hidden',
-              border: `1px solid ${dragging ? T.accent : T.border}`,
-              transition: 'border-color 0.15s', cursor: 'pointer',
-              width: CANVAS_SIZE, height: CANVAS_SIZE,
-              background: T.panel,
-            }}
+            style={{ display: sourceCollapsed ? 'none' : 'block', position: 'relative', cursor: 'pointer', width: '100%', aspectRatio: '1', maxHeight: CANVAS_SIZE, background: T.panel, overflow: 'hidden' }}
             onDrop={handleDrop}
             onDragOver={e => { e.preventDefault(); setDragging(true) }}
             onDragLeave={() => setDragging(false)}
           >
-            <canvas ref={imageCanvasRef} width={CANVAS_SIZE} height={CANVAS_SIZE} style={{ display: 'block' }} />
+            <canvas ref={imageCanvasRef} width={CANVAS_SIZE} height={CANVAS_SIZE} style={{ display: 'block', width: '100%', height: '100%' }} />
             {dragging && (
               <div style={{
                 position: 'absolute', inset: 0, display: 'flex',
@@ -733,27 +752,37 @@ const handleExportPNG = useCallback(() => {
         </div>
 
         {/* Palette canvas */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
+        <div style={{
+          display: 'flex', flexDirection: 'column', flex: 1, minWidth: 276, width: '100%',
+          borderRadius: '10px', overflow: 'hidden',
+          border: `1px solid ${T.border}`,
+        }}>
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: '6px',
+            padding: '10px', borderBottom: paletteCollapsed ? 'none' : `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>PALETTE · click cell to copy hex</span>
+              <button onClick={() => setPaletteCollapsed(c => !c)} style={{ ...btn(T), padding: '4px 10px', fontSize: '14px', lineHeight: 1, flexShrink: 0 }}>
+                {paletteCollapsed ? '▾' : '▴'}
+              </button>
+            </div>
             <div style={{ display: 'flex', gap: '6px' }}>
-<button onClick={handleExportPNG} disabled={running} style={btn(T)}>Export PNG</button>
+              <button onClick={handleExportPNG} disabled={running} style={btn(T)}>Export PNG</button>
               <button onClick={handleExportGPL} disabled={running} style={btn(T)}>Export GPL</button>
             </div>
           </div>
-          <div style={{
-            position: 'relative', borderRadius: '10px', overflow: 'hidden',
-            border: `1px solid ${T.border}`,
-            background: T.paletteBg,
-          }}>
+          <div style={{ display: paletteCollapsed ? 'none' : 'block', position: 'relative', background: T.paletteBg }}>
             <canvas
               ref={paletteCanvasRef}
               width={params.cols}
               height={params.rows}
               style={{
                 display: 'block',
-                height: CANVAS_SIZE,
-                width: `min(${CANVAS_SIZE * params.cols / params.rows}px, 100%)`,
+                width: '100%',
+                height: 'auto',
+                maxHeight: CANVAS_SIZE,
                 cursor: 'crosshair',
                 imageRendering: 'pixelated',
               }}
@@ -801,70 +830,76 @@ const handleExportPNG = useCallback(() => {
       </div>
 
       {/* 3D views */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px' }}>
+      <div style={{ flex: 1, minHeight: CANVAS_SIZE, display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'flex-start', alignContent: 'flex-start' }}>
 
         {/* RGB cube — always shown */}
         <div style={{
-          flex: 1, borderRadius: '10px', overflow: 'hidden',
+          flex: 1, minWidth: 280, minHeight: colorSpaceCollapsed ? 0 : CANVAS_SIZE, borderRadius: '10px', overflow: 'hidden',
           border: `1px solid ${T.border}`,
           background: T.canvas3d,
           display: 'flex', flexDirection: 'column',
         }}>
           {/* Header */}
           <div style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            padding: '6px 10px', borderBottom: `1px solid ${T.border}`,
-            background: T.panel, flexShrink: 0,
+            display: 'flex', flexDirection: 'column', gap: '6px',
+            padding: '10px', borderBottom: colorSpaceCollapsed ? 'none' : `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0, minHeight: 96,
           }}>
-            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>COLOR SPACE</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              {(['rgb', 'oklab', 'oklch', 'hsv', 'hsl'] as VizSpace[]).map(space => {
-                const [x, y, z] = VIZ_AXES[space]
-                const active = vizSpace === space
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>COLOR SPACE</span>
+              <button
+                onClick={() => setColorSpaceCollapsed(c => !c)}
+                style={{ ...btn(T), padding: '4px 10px', fontSize: '14px', lineHeight: 1, flexShrink: 0 }}
+              >
+                {colorSpaceCollapsed ? '▾' : '▴'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden', alignSelf: 'flex-start' }}>
+                  {(['rgb', 'oklab', 'oklch', 'hsv', 'hsl'] as VizSpace[]).map(space => {
+                    const [x, y, z] = VIZ_AXES[space]
+                    const active = vizSpace === space
+                    return (
+                      <button
+                        key={space}
+                        onClick={() => setVizSpace(space)}
+                        style={{
+                          padding: '3px 8px', border: 'none',
+                          background: active ? T.border : 'transparent',
+                          color: active ? T.accent : T.muted,
+                          fontFamily: 'inherit', fontSize: '10px',
+                          cursor: 'pointer', letterSpacing: '0.05em',
+                        }}
+                        title={`${x} · ${y} · ${z}`}
+                      >
+                        {space.toUpperCase()}
+                      </button>
+                    )
+                  })}
+            </div>
+            <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden', alignSelf: 'flex-start' }}>
+              {([false, true] as const).map(val => {
+                const active = compress === val
                 return (
                   <button
-                    key={space}
-                    onClick={() => setVizSpace(space)}
+                    key={String(val)}
+                    onClick={() => setCompress(val)}
                     style={{
-                      padding: '3px 8px', borderRadius: '4px',
-                      border: `1px solid ${active ? T.accent : T.border}`,
+                      padding: '3px 8px', border: 'none',
                       background: active ? T.border : 'transparent',
                       color: active ? T.accent : T.muted,
                       fontFamily: 'inherit', fontSize: '10px',
                       cursor: 'pointer', letterSpacing: '0.05em',
                     }}
-                    title={`${x} · ${y} · ${z}`}
                   >
-                    {space.toUpperCase()}
+                    {val ? 'Compressed' : 'True Color'}
                   </button>
                 )
               })}
-              <div style={{ width: '1px', height: '14px', background: T.border, margin: '0 2px' }} />
-              <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden' }}>
-                {([false, true] as const).map(val => {
-                  const active = compress === val
-                  return (
-                    <button
-                      key={String(val)}
-                      onClick={() => setCompress(val)}
-                      style={{
-                        padding: '3px 8px', border: 'none',
-                        background: active ? T.border : 'transparent',
-                        color: active ? T.accent : T.muted,
-                        fontFamily: 'inherit', fontSize: '10px',
-                        cursor: 'pointer', letterSpacing: '0.05em',
-                      }}
-                    >
-                      {val ? 'Compressed' : 'True Color'}
-                    </button>
-                  )
-                })}
-              </div>
             </div>
           </div>
-          <Canvas
+          {!colorSpaceCollapsed && <Canvas
             camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
-            style={{ flex: 1 }}
+            style={{ height: CANVAS_SIZE }}
             gl={{ antialias: true }}
           >
             <ColorCube
@@ -877,33 +912,41 @@ const handleExportPNG = useCallback(() => {
               compress={compress}
               topology={params.topology}
             />
-          </Canvas>
+          </Canvas>}
         </div>
 
         {/* Topology 3D view — always shown */}
         <div style={{
-          flex: 1, borderRadius: '10px', overflow: 'hidden',
+          flex: 1, minWidth: 280, minHeight: topologyCollapsed ? 0 : CANVAS_SIZE, borderRadius: '10px', overflow: 'hidden',
           border: `1px solid ${T.border}`,
           background: T.canvas3d,
           display: 'flex', flexDirection: 'column',
         }}>
           {/* Header */}
           <div style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-            padding: '6px 10px', borderBottom: `1px solid ${T.border}`,
-            background: T.panel, flexShrink: 0,
+            display: 'flex', flexDirection: 'column', gap: '6px',
+            padding: '10px', borderBottom: topologyCollapsed ? 'none' : `1px solid ${T.border}`,
+            background: T.panel, flexShrink: 0, minHeight: 96,
           }}>
-            <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em', paddingTop: '4px' }}>TOPOLOGY</span>
-            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden', maxWidth: '80%' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em' }}>TOPOLOGY</span>
+              <button
+                onClick={() => setTopologyCollapsed(c => !c)}
+                style={{ ...btn(T), padding: '4px 10px', fontSize: '14px', lineHeight: 1, flexShrink: 0 }}
+              >
+                {topologyCollapsed ? '▾' : '▴'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden', alignSelf: 'flex-start' }}>
               {([
                 ['cone', 'Triangle'],
                 ['bicone', 'Bigon'],
                 ['rectangular', 'Rectangle'],
-                ['cylindrical', 'Cylinder'], 
+                ['cylindrical', 'Cylinder'],
                 ['mobius', 'Möbius'],
                 ['klein', 'Klein'],
-                ['toroidal', 'Torus'], 
-                ['spherical', 'Sphere'], 
+                ['toroidal', 'Torus'],
+                ['spherical', 'Sphere'],
                 ['projective', 'Projective'],
               ] as const).map(([value, label]) => {
                 const active = params.topology === value
@@ -927,9 +970,9 @@ const handleExportPNG = useCallback(() => {
               })}
             </div>
           </div>
-          <Canvas
+          {!topologyCollapsed && <Canvas
             camera={{ position: [0, 0, 1.5], fov: 45 }}
-            style={{ flex: 1 }}
+            style={{ height: CANVAS_SIZE }}
             gl={{ antialias: true }}
           >
             <TopologyScene
@@ -940,10 +983,14 @@ const handleExportPNG = useCallback(() => {
               rowsRef={rowsRef}
               colsRef={colsRef}
             />
-          </Canvas>
+          </Canvas>}
         </div>
 
       </div>
+
+    </div>
+
+    <div style={{ height: '30vh' }} />
 
     </div>
   )
