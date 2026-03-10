@@ -50,7 +50,7 @@ const DEFAULT_PARAMS: Params = {
   quality: 5.4,
   blendDecay: 0.5,
   radiusDecay: 0.5,
-  topology: 'toroidal',
+  topology: 'rectangular',
   gaussian: true,
   randomInit: true,
   maskColor: null,
