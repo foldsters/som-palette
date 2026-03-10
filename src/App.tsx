@@ -430,15 +430,15 @@ const handleExportPNG = useCallback(() => {
             Self-Organizing Map · drop an image to begin
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginLeft: 'auto' }}>
           
-          <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px', fontSize: '24px' }} title="Toggle light / dark">
+          <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px', fontSize: '20px' }} title="Toggle light / dark">
             {lightMode ? '◑' : '◐'}
           </button>
-          <button onClick={() => setChromaMode(m => !m)} style={{ ...btn(T, chromaMode), padding: '5px 12px', fontSize: '24px' }} title="Use palette corner colors to tint the UI">
+          <button onClick={() => setChromaMode(m => !m)} style={{ ...btn(T, chromaMode), padding: '5px 12px', fontSize: '20px' }} title="Use palette corner colors to tint the UI">
             ✦
           </button>
-          <button onClick={() => setShowInfo(true)} style={{ ...btn(T), padding: '5px 12px', fontSize: '24px' }}>?</button>
+          <button onClick={() => setShowInfo(true)} style={{ ...btn(T), padding: '5px 12px', fontSize: '20px' }}>?</button>
         </div>
       </div>
 
