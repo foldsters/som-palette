@@ -233,7 +233,12 @@ export default function App() {
     localStorage.removeItem('som_image')
     const canvas = imageCanvasRef.current
     if (canvas) canvas.getContext('2d')?.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE)
+    const palette = paletteCanvasRef.current
+    if (palette) palette.getContext('2d')?.clearRect(0, 0, palette.width, palette.height)
     setImageData(null)
+    setPaletteCopy(null)
+    setPaletteCorners(null)
+    paletteReadyRef.current = false
   }, [])
 
   useEffect(() => {
