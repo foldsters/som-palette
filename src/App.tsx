@@ -243,7 +243,7 @@ export default function App() {
 
   useEffect(() => {
     const cached = localStorage.getItem('som_image')
-    loadFromSrc(cached ?? '/planet.jpeg', !cached)
+    loadFromSrc(cached ?? `${import.meta.env.BASE_URL}default.jpeg`, !cached)
   }, [loadFromSrc])
 
   // ─── Training ──────────────────────────────────────────────────────────────
