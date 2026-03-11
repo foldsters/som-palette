@@ -307,9 +307,10 @@ export interface ColorCubeProps {
   lightMode: boolean
   compress: boolean
   topology: Topology
+  showGrid: boolean
 }
 
-export default function ColorCube({ imageData, palette, rows, cols, vizSpace, lightMode, compress, topology }: ColorCubeProps) {
+export default function ColorCube({ imageData, palette, rows, cols, vizSpace, lightMode, compress, topology, showGrid }: ColorCubeProps) {
   const pivotRef = useRef<THREE.Group>(null)
   const controlsRef = useRef<OrbitControlsImpl>(null)
   const interacted = useRef(false)
@@ -343,7 +344,7 @@ export default function ColorCube({ imageData, palette, rows, cols, vizSpace, li
             ? <CylinderFrame vizSpace={vizSpace} lightMode={lightMode} />
             : <CubeFrame vizSpace={vizSpace} lightMode={lightMode} />}
           {imageData && <ImageCloud imageData={imageData} vizSpace={vizSpace} compress={compress} lightMode={lightMode} />}
-          {palette && <PaletteGrid palette={palette} rows={rows} cols={cols} vizSpace={vizSpace} compress={compress} lightMode={lightMode} topology={topology} />}
+          {palette && showGrid && <PaletteGrid palette={palette} rows={rows} cols={cols} vizSpace={vizSpace} compress={compress} lightMode={lightMode} topology={topology} />}
           {palette && <PaletteCloud palette={palette} rows={rows} cols={cols} vizSpace={vizSpace} compress={compress} lightMode={lightMode} />}
         </group>
       </group>

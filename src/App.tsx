@@ -121,6 +121,7 @@ export default function App() {
   const [lightMode, setLightMode]     = useState(false)
   const [chromaMode, setChromaMode]   = useState(false)
   const [compress, setCompress]       = useState(false)
+  const [showGrid, setShowGrid]       = useState(true)
   const [showInfo, setShowInfo]       = useState(false)
 
   const T = deriveTheme(chromaMode ? paletteCorners : null, lightMode)
@@ -890,25 +891,39 @@ const handleExportPNG = useCallback(() => {
                     )
                   })}
             </div>
-            <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden', alignSelf: 'flex-start' }}>
-              {([false, true] as const).map(val => {
-                const active = compress === val
-                return (
-                  <button
-                    key={String(val)}
-                    onClick={() => setCompress(val)}
-                    style={{
-                      padding: '3px 8px', border: 'none',
-                      background: active ? T.border : 'transparent',
-                      color: active ? T.accent : T.muted,
-                      fontFamily: 'inherit', fontSize: '10px',
-                      cursor: 'pointer', letterSpacing: '0.05em',
-                    }}
-                  >
-                    {val ? 'Contrast' : 'True Color'}
-                  </button>
-                )
-              })}
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', alignSelf: 'flex-start' }}>
+              <div style={{ display: 'flex', border: `1px solid ${T.border}`, borderRadius: '4px', overflow: 'hidden' }}>
+                {([false, true] as const).map(val => {
+                  const active = compress === val
+                  return (
+                    <button
+                      key={String(val)}
+                      onClick={() => setCompress(val)}
+                      style={{
+                        padding: '3px 8px', border: 'none',
+                        background: active ? T.border : 'transparent',
+                        color: active ? T.accent : T.muted,
+                        fontFamily: 'inherit', fontSize: '10px',
+                        cursor: 'pointer', letterSpacing: '0.05em',
+                      }}
+                    >
+                      {val ? 'Contrast' : 'True Color'}
+                    </button>
+                  )
+                })}
+              </div>
+              <button
+                onClick={() => setShowGrid(g => !g)}
+                style={{
+                  padding: '3px 8px', border: `1px solid ${T.border}`, borderRadius: '4px',
+                  background: showGrid ? T.border : 'transparent',
+                  color: showGrid ? T.accent : T.muted,
+                  fontFamily: 'inherit', fontSize: '10px',
+                  cursor: 'pointer', letterSpacing: '0.05em',
+                }}
+              >
+                Grid
+              </button>
             </div>
           </div>
           {!colorSpaceCollapsed && <Canvas
@@ -925,6 +940,7 @@ const handleExportPNG = useCallback(() => {
               lightMode={lightMode}
               compress={compress}
               topology={params.topology}
+              showGrid={showGrid}
             />
           </Canvas>}
         </div>
