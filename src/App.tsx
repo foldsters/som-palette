@@ -366,15 +366,15 @@ const handleExportPNG = useCallback(() => {
   }, [])
 
   const handleExportGPL = useCallback(() => {
-    const p = paramsRef.current
-    const palette = paletteRef.current
-    const { rows, cols } = p
+    const canvas = paletteCanvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const { width: cols, height: rows } = canvas
+    const px = ctx.getImageData(0, 0, cols, rows).data
     const lines = ['GIMP Palette', 'Name: SOM Palette', `Columns: ${cols}`, '#']
     for (let i = 0; i < rows * cols; i++) {
-      const r = palette[i * 3], g = palette[i * 3 + 1], b = palette[i * 3 + 2]
-      const ri = Math.round(Math.max(0, Math.min(1, r)) * 255)
-      const gi = Math.round(Math.max(0, Math.min(1, g)) * 255)
-      const bi = Math.round(Math.max(0, Math.min(1, b)) * 255)
+      const ri = px[i * 4], gi = px[i * 4 + 1], bi = px[i * 4 + 2]
       lines.push(`${ri.toString().padStart(3)} ${gi.toString().padStart(3)} ${bi.toString().padStart(3)}\tUntitled`)
     }
     const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
