@@ -7,9 +7,13 @@ function buildParametric(
   fn: (u: number, v: number) => [number, number, number],
   nu: number, nv: number,
   uvFn?: (i: number, j: number, nu: number, nv: number) => [number, number],
+  keepFn?: (i: number, j: number, nu: number, nv: number) => boolean,
 ): THREE.BufferGeometry {
   const positions: number[] = []
+  const flatPositions: number[] = []
   const uvs: number[] = []
+  const uvsT: number[] = []
+  const alphas: number[] = []
   const indices: number[] = []
 
   for (let i = 0; i <= nu; i++) {
@@ -19,17 +23,25 @@ function buildParametric(
       positions.push(x, y, z)
       const [tu, tv] = uvFn ? uvFn(i, j, nu, nv) : [u, v]
       uvs.push(tu, tv)
+      uvsT.push(tv, tu)
+      alphas.push(1)
+      // Flat position: UV coords mapped to ±0.45 square at z=0
+      flatPositions.push((tu - 0.5) * 0.9, (tv - 0.5) * 0.9, 0)
     }
   }
   for (let i = 0; i < nu; i++) {
     for (let j = 0; j < nv; j++) {
+      if (keepFn && !keepFn(i, j, nu, nv)) continue
       const a = i * (nv + 1) + j
       indices.push(a, a + nv + 1, a + 1, a + 1, a + nv + 1, a + nv + 2)
     }
   }
   const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  geo.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2))
+  geo.setAttribute('position',     new THREE.Float32BufferAttribute(positions, 3))
+  geo.setAttribute('flatPosition', new THREE.Float32BufferAttribute(flatPositions, 3))
+  geo.setAttribute('uv',           new THREE.Float32BufferAttribute(uvs, 2))
+  geo.setAttribute('uvTransposed', new THREE.Float32BufferAttribute(uvsT, 2))
+  geo.setAttribute('vertexAlpha',  new THREE.Float32BufferAttribute(alphas, 1))
   geo.setIndex(indices)
   geo.computeVertexNormals()
   return geo
@@ -40,7 +52,7 @@ function buildParametric(
 
 // Rectangle — flat plane
 export function makeRectangle(): THREE.BufferGeometry {
-  return new THREE.PlaneGeometry(0.9, 0.9, 64, 64)
+  return buildParametric((u, v) => [(u - 0.5) * 0.9, (v - 0.5) * 0.9, 0], 64, 64)
 }
 
 // Ogive V — F:FC — flat wedge; which edge is collapsed determines apex position.
@@ -48,7 +60,7 @@ export function makeRectangle(): THREE.BufferGeometry {
 // Curve formula for apex-at-v=1: w = 0.9*(1−v²)  → f'(0)=0 (⊥ base), 90° at apex
 // Curve formula for apex-at-v=0: w = 0.9*(2v−v²) → f'(1)=0 (⊥ base), 90° at apex
 export function makeOgiveV(cfg: EdgeConfig): THREE.BufferGeometry {
-  if (cfg.top === 'collapsed') {
+  if (cfg.top === 'pinched') {
     // apex at top: UV v=1 = palette row 0 (top, collapsed)
     return buildParametric((u, v) => {
       const w = 0.9 * (1 - v * v)
@@ -68,7 +80,7 @@ export function makeOgiveV(cfg: EdgeConfig): THREE.BufferGeometry {
 // Curve formula for apex-at-u=1: h = 0.9*(1−u²)  → h'(0)=0 (⊥ base), 90° at apex
 // Curve formula for apex-at-u=0: h = 0.9*(2u−u²) → h'(1)=0 (⊥ base), 90° at apex
 export function makeOgiveH(cfg: EdgeConfig): THREE.BufferGeometry {
-  if (cfg.right === 'collapsed') {
+  if (cfg.right === 'pinched') {
     // apex at right: UV u=1 = palette right column (collapsed)
     return buildParametric((u, v) => {
       const h = 0.9 * (1 - u * u)
@@ -113,8 +125,8 @@ export function makeCanoe(cfg: EdgeConfig): THREE.BufferGeometry {
   const L = 0.9
   const W = L / Math.PI          // 90° condition: Wπ = L
   const s = 1 / Math.sqrt(2)
-  const flipU = cfg.left === 'collapsed'   // pu = 1−u so left edge (u=0) → pu=1 → pole
-  const flipV = cfg.top  === 'collapsed'   // pv = 1−v so top  edge (v=1) → pv=0 → pole
+  const flipU = cfg.left === 'pinched'   // pu = 1−u so left edge (u=0) → pu=1 → pole
+  const flipV = cfg.top  === 'pinched'   // pv = 1−v so top  edge (v=1) → pv=0 → pole
   return buildParametric((u, v) => {
     const pu  = flipU ? 1 - u : u
     const pv  = flipV ? 1 - v : v
@@ -168,9 +180,9 @@ export function makeSauciere(cfg: EdgeConfig): THREE.BufferGeometry {
   //   feed t (normalized to [0,1] along teardrop axis) into tearProfile
 
   const freeEdge =
-    cfg.bottom === 'free' ? 'bottom' :
-    cfg.top    === 'free' ? 'top' :
-    cfg.left   === 'free' ? 'left' : 'right'
+    cfg.bottom === 'open' ? 'bottom' :
+    cfg.top    === 'open' ? 'top' :
+    cfg.left   === 'open' ? 'left' : 'right'
 
   return buildParametric((u, v) => {
     // Remap (u,v) so the free edge always feeds the formula as the bottom (pu=u, pv=0)
@@ -192,49 +204,6 @@ export function makeSauciere(cfg: EdgeConfig): THREE.BufferGeometry {
   }, 64, 64)
 }
 
-// Teardrop — solid of revolution.
-// u = pole-to-tip axis (UV u=0 → hemisphere pole, UV u=1 → ogive tip).
-// v = wraps around the equator (UV v=0=1, seam stays at the wrap boundary).
-// This keeps collapsed outer color only at the tip and the seam invisible.
-export function makeTeardrop(): THREE.BufferGeometry {
-  const R     = 0.28
-  const L     = R / Math.tan(27.5 * Math.PI / 180)  // ~55° half-angle → ~110° full tip
-  const rho   = (R * R + L * L) / (2 * R)
-  const cr    = (R * R - L * L) / (2 * R)
-  const a_tip = Math.atan2(L, -cr)
-  const y_off = (R - L) / 2
-
-  return buildParametric((u, v) => {
-    const theta = v * 2 * Math.PI  // v wraps around
-    let r: number, y: number
-
-    if (u <= 0.5) {
-      // Hemisphere: u=0 (pole) → u=0.5 (equator)
-      const s = u * 2
-      r = R * Math.sin(s * Math.PI / 2)
-      y = -R * Math.cos(s * Math.PI / 2) + y_off
-    } else {
-      // Tangent ogive: u=0.5 (equator) → u=1 (tip)
-      const a = a_tip * (u - 0.5) * 2
-      r = cr + rho * Math.cos(a)
-      y = rho * Math.sin(a) + y_off
-    }
-
-    return [r * Math.cos(theta), y, r * Math.sin(theta)]
-  }, 64, 64, (i, j, nu, nv) => {
-    // Hybrid UV: circular for most of the surface (avoids the near-corner palette
-    // cells that are doubly influenced by two collapsed borders, which cause diagonal
-    // spike artifacts), blending to square-polar only at the very tip so t=1 always
-    // lands on the actual collapsed border for all angles.
-    const t      = i / nu
-    const angle  = j / nv * 2 * Math.PI
-    const ca     = Math.cos(angle)
-    const sa     = Math.sin(angle)
-    const sqNorm = Math.max(Math.abs(ca), Math.abs(sa))
-    const norm   = 1 + (sqNorm - 1) * t ** 8   // 1 (circle) at t=0, sqNorm (square) at t=1
-    return [0.5 + t * 0.5 * ca / norm, 0.5 + t * 0.5 * sa / norm]
-  })
-}
 
 // Cylinder H — W:F — left/right edges glued; u wraps around, v is free height axis
 export function makeCylinderH(): THREE.BufferGeometry {
@@ -258,8 +227,8 @@ export function makeCylinderV(): THREE.BufferGeometry {
 // FC:W → v wraps (theta=v), u goes equator-to-pole (phi=u·π/2)
 //   pole at right (u=1) if right collapsed, pole at left (u=0) if left collapsed
 export function makeDome(cfg: EdgeConfig): THREE.BufferGeometry {
-  const hWrap = cfg.hConnect === 'wrap'
-  const flipAxis = hWrap ? cfg.bottom === 'collapsed' : cfg.left === 'collapsed'
+  const hWrap = cfg.hJoin === 'wrap'
+  const flipAxis = hWrap ? cfg.bottom === 'pinched' : cfg.left === 'pinched'
   return buildParametric((u, v) => {
     const theta = (hWrap ? u : v) * 2 * Math.PI
     const raw   = hWrap ? v : u
@@ -277,7 +246,7 @@ export function makeDome(cfg: EdgeConfig): THREE.BufferGeometry {
 // W:C → u wraps (theta=u), v goes pole-to-pole (phi=v·π)
 // C:W → v wraps (theta=v), u goes pole-to-pole (phi=u·π)
 export function makeSphere(cfg: EdgeConfig): THREE.BufferGeometry {
-  const hWrap = cfg.hConnect === 'wrap'
+  const hWrap = cfg.hJoin === 'wrap'
   return buildParametric((u, v) => {
     const theta = (hWrap ? u : v) * 2 * Math.PI
     const phi   = (hWrap ? v : u) * Math.PI
@@ -397,7 +366,7 @@ export function makeMobiusV(): THREE.BufferGeometry {
 // T:W → a=u, b=v;  W:T → a=v, b=u
 export function makeKlein(cfg: EdgeConfig): THREE.BufferGeometry {
   const s = 0.18
-  const hTwist = cfg.hConnect === 'twist'
+  const hTwist = cfg.hJoin === 'twist'
   return buildParametric((u, v) => {
     const a = (hTwist ? u : v) * 2 * Math.PI
     const b = (hTwist ? v : u) * 2 * Math.PI
@@ -442,15 +411,33 @@ export function makeBoySurface(): THREE.BufferGeometry {
     const norm = g1*g1 + g2*g2 + g3*g3
     return [g1/norm * s, g2/norm * s, g3/norm * s]
   }
-  // UV: polar coords centered at (0.5, 0.5) so the wrap seam at u=0/1 maps to
-  // the same palette point and v=0 (center of disk) maps to palette center.
-  return buildParametric(compute, 96, 96, (i, j, nu, nv) => {
-    const u = i / nu, v = j / nv
-    return [
-      0.5 + v * 0.5 * Math.cos(u * 2 * Math.PI),
-      0.5 + v * 0.5 * Math.sin(u * 2 * Math.PI),
-    ]
-  })
+  const nu = 96, nv = 96
+  const geo = buildParametric((u, v) => {
+    const dx = u - 0.5, dy = v - 0.5
+    const radius = Math.min(1, Math.sqrt(dx*dx + dy*dy) / 0.5)
+    const angle = ((Math.atan2(dy, dx) / (2 * Math.PI)) + 1) % 1
+    return compute(angle, radius)
+  }, nu, nv)
+  // circlePosition: square corners pushed inward to circle, morph waypoint at morphT=0.5
+  const circPos: number[] = []
+  for (let i = 0; i <= nu; i++) {
+    for (let j = 0; j <= nv; j++) {
+      const x = (i/nu - 0.5) * 0.9, y = (j/nv - 0.5) * 0.9
+      const r = Math.sqrt(x*x + y*y)
+      const scale = r < 1e-10 ? 0 : Math.max(Math.abs(x), Math.abs(y)) / r
+      circPos.push(x * scale, y * scale, 0)
+    }
+  }
+  geo.setAttribute('circlePosition', new THREE.Float32BufferAttribute(circPos, 3))
+  // Override flatPosition with plain square (uvFn remaps it to polar, which is wrong for flat)
+  const flatPos: number[] = []
+  for (let i = 0; i <= nu; i++) {
+    for (let j = 0; j <= nv; j++) {
+      flatPos.push((i/nu - 0.5) * 0.9, (j/nv - 0.5) * 0.9, 0)
+    }
+  }
+  geo.setAttribute('flatPosition', new THREE.Float32BufferAttribute(flatPos, 3))
+  return geo
 }
 
 // Cross-cap — T:K or K:T — standard parametrization
@@ -458,48 +445,62 @@ export function makeBoySurface(): THREE.BufferGeometry {
 // x = sin(u)·sin(2v)/2,  y = sin(2u)·sin²(v),  z = cos(2u)·sin²(v)  (scaled)
 export function makeCrossCap(cfg: EdgeConfig): THREE.BufferGeometry {
   const s = 0.7
-  const hTwist = cfg.hConnect === 'twist'
+  const hCollapse = cfg.left === 'pinched'
+  const twOf = (i: number, j: number, nu: number, nv: number) => hCollapse ? j / nv : i / nu
   return buildParametric((u, v) => {
-    const tw = hTwist ? u : v
-    const cl = hTwist ? v : u
-    const a = tw * 2 * Math.PI                  // twist axis
-    const b = (hTwist ? cl : Math.sin(cl * Math.PI) ) * Math.PI / 2  // collapse axis: K needs both ends to pinch
+    const tw = hCollapse ? v : u
+    const cl = hCollapse ? u : v
+    const a = tw * 2 * Math.PI
+    const b = cl * Math.PI
     return [
       0.5 * Math.sin(a) * Math.sin(2 * b) * s,
       0.5 * Math.sin(2 * a) * Math.sin(b) * Math.sin(b) * s,
       0.5 * Math.cos(2 * a) * Math.sin(b) * Math.sin(b) * s,
     ]
-  }, 96, 64)
+  }, 96, 64,
+  !hCollapse
+    ? (i, j, nu, nv) => [j / nv, (i / nu) * 2] as [number, number]
+    : (i, j, nu, nv) => [(j / nv) * 2, i / nu] as [number, number],
+  (i, j, nu, nv) => twOf(i, j, nu, nv) <= 0.5)
 }
 
-// Conch — T:FC — Möbius-like but one edge collapsed
-export function makeConch(): THREE.BufferGeometry {
-  const R = 0.28, w = 0.18
+// Nautilus — T:FC or FC:T — lemniscate spine with one edge pinched to origin
+export function makeNautilus(cfg: EdgeConfig): THREE.BufferGeometry {
+  const R = 0.35
+  const hTwist = cfg.hJoin === 'twist'
+  const flipU = hTwist ? cfg.right === 'pinched' : cfg.top    === 'pinched'
+  const flipV = hTwist ? cfg.top   === 'pinched' : cfg.right  === 'pinched'
   return buildParametric((u, v) => {
-    const angle = u * 2 * Math.PI
-    const t     = v * w  // 0=collapsed pole, w=free edge (asymmetric)
-    const cosH  = Math.cos(angle / 2)
-    const sinH  = Math.sin(angle / 2)
+    const angle  = v * Math.PI
+    const bulge  = Math.sin(u * Math.PI) * R
+    const shrink = Math.sin(v * Math.PI / 2) ** 0.4
     return [
-      (R + t * cosH) * Math.cos(angle),
-      t * sinH,
-      (R + t * cosH) * Math.sin(angle),
+      (u - 0.5) * 0.8 * Math.sin(u * Math.PI) * shrink * shrink,
+      Math.cos(angle) * bulge * shrink,
+      Math.sin(angle) * bulge * shrink,
     ]
-  }, 128, 16)
+  }, 64, 32,
+  (i, j, nu, nv) => {
+    const uu = flipU ? 1 - i / nu : i / nu
+    const vv = flipV ? 1 - j / nv : j / nv
+    return hTwist ? [uu, vv] : [vv, uu]
+  })
 }
 
-// Roman Surface — T:C or C:T — Steiner's Roman surface
-export function makeRomanSurface(): THREE.BufferGeometry {
+
+// Quadrupole — all-pinched (K:K) — Roman surface with squeeze, 4-lobe self-intersecting shape
+export function makeQuadrupole(): THREE.BufferGeometry {
   const s = 0.45
   return buildParametric((u, v) => {
     const a = u * Math.PI
     const b = v * Math.PI
     const cosA = Math.cos(a), sinA = Math.sin(a)
     const cosB = Math.cos(b), sinB = Math.sin(b)
+    const squeeze = Math.sin(v * Math.PI)
     return [
-      sinA * sinA * sinB * cosB * s,
-      sinA * cosA * cosB * s,
-      sinA * cosA * sinB * s,
+      sinA * sinA * cosB * s * squeeze,
+      sinA * cosA * cosB * s * squeeze,
+      sinA * cosA * sinB * s * squeeze,
     ]
   }, 64, 64)
 }
@@ -514,58 +515,54 @@ export type MeshBuilder = (cfg: EdgeConfig) => THREE.BufferGeometry
 const geo = (fn: () => THREE.BufferGeometry): MeshBuilder => () => fn()
 
 export const TOPOLOGY_MESH_BUILDERS: Record<string, MeshBuilder> = {
-  'F:F':   geo(makeRectangle),
+  'open:open':                 geo(makeRectangle),
   // Ogive — receives cfg so it knows which specific edge is collapsed
-  'FC:F':  makeOgiveH,
-  'F:FC':  makeOgiveV,
-  // Lens — flat, poles at left/right (C:F) or top/bottom (F:C)
-  'C:F':   geo(makeLensH),
-  'F:C':   geo(makeLensV),
-  // Canoe — both axes FC (receives cfg so it knows which specific corner is collapsed)
-  'FC:FC': makeCanoe,
+  'half-pinched:open':         makeOgiveH,
+  'open:half-pinched':         makeOgiveV,
+  // Lens — flat, poles at left/right (pinched:open) or top/bottom (open:pinched)
+  'pinched:open':              geo(makeLensH),
+  'open:pinched':              geo(makeLensV),
+  // Canoe — both axes half-pinched (receives cfg so it knows which specific corner is collapsed)
+  'half-pinched:half-pinched': makeCanoe,
   // Saucière — receives cfg so it knows which edge is free
-  'FC:C':  makeSauciere,
-  'C:FC':  makeSauciere,
-  'FC:K':  makeSauciere,
-  'K:FC':  makeSauciere,
-  // Teardrop — both C, or C + K
-  'C:C':   geo(makeTeardrop),
-  'C:K':   geo(makeTeardrop),
-  'K:C':   geo(makeTeardrop),
-  // Cylinder — orientation matters: W:F wraps u (horizontal), F:W wraps v (vertical)
-  'W:F':   geo(makeCylinderH),
-  'F:W':   geo(makeCylinderV),
+  'half-pinched:pinched':      makeSauciere,
+  'pinched:half-pinched':      makeSauciere,
+  'half-pinched:pinched-joined': makeSauciere,
+  'pinched-joined:half-pinched': makeSauciere,
+  'pinched:pinched':           geo(makeQuadrupole),
+  'pinched:pinched-joined':    geo(makeQuadrupole),
+  'pinched-joined:pinched':    geo(makeQuadrupole),
+  // Cylinder — orientation matters: wrapped:open wraps u (horizontal), open:wrapped wraps v (vertical)
+  'wrapped:open':              geo(makeCylinderH),
+  'open:wrapped':              geo(makeCylinderV),
   // Dome
-  'W:FC':  makeDome,
-  'FC:W':  makeDome,
+  'wrapped:half-pinched':      makeDome,
+  'half-pinched:wrapped':      makeDome,
   // Sphere
-  'W:C':   makeSphere,
-  'C:W':   makeSphere,
+  'wrapped:pinched':           makeSphere,
+  'pinched:wrapped':           makeSphere,
   // Torus
-  'W:W':   geo(makeTorus),
+  'wrapped:wrapped':           geo(makeTorus),
   // Horn Torus
-  'W:K':   geo(makeHornTorusH),
-  'K:W':   geo(makeHornTorusV),
+  'wrapped:pinched-joined':    geo(makeHornTorusH),
+  'pinched-joined:wrapped':    geo(makeHornTorusV),
   // Cannoli
-  'K:F':   geo(makeCannoliH),
-  'F:K':   geo(makeCannoliV),
-  // Tortellini — same topology as teardrop
-  'K:K':   geo(makeTeardrop),
+  'pinched-joined:open':       geo(makeCannoliH),
+  'open:pinched-joined':       geo(makeCannoliV),
+  // Roman Surface — all 4 edges pinched-joined (self-intersecting, 4 poles)
+  'pinched-joined:pinched-joined': geo(makeQuadrupole),
   // Möbius
-  'T:F':   geo(makeMobiusH),
-  'F:T':   geo(makeMobiusV),
+  'twisted:open':              geo(makeMobiusH),
+  'open:twisted':              geo(makeMobiusV),
   // Klein
-  'T:W':   makeKlein,
-  'W:T':   makeKlein,
+  'twisted:wrapped':           makeKlein,
+  'wrapped:twisted':           makeKlein,
   // Boy's Surface
-  'T:T':   geo(makeBoySurface),
+  'twisted:twisted':           geo(makeBoySurface),
   // Cross-cap
-  'T:K':   makeCrossCap,
-  'K:T':   makeCrossCap,
-  // Conch
-  'T:FC':  geo(makeConch),
-  'FC:T':  geo(makeConch),
-  // Roman Surface
-  'T:C':   geo(makeRomanSurface),
-  'C:T':   geo(makeRomanSurface),
+  'twisted:pinched-joined':    makeCrossCap,
+  'pinched-joined:twisted':    makeCrossCap,
+  // Nautilus
+  'twisted:half-pinched':      makeNautilus,
+  'half-pinched:twisted':      makeNautilus,
 }
