@@ -4,15 +4,19 @@ A **palettope** is a 2D palette grid with edge assignments that define its topol
 
 ---
 
-## Edge Arrows
+## Edge Controls
 
-Each of the four edges has a d-pad selector with 5 positions:
+Each of the four edges has a circular hotspot at its midpoint. The current edge state is shown as an arrow glyph inside the circle.
 
-```
-    ↑
-  ← · →
-    ↓
-```
+**Interaction:**
+- **Click** — clear the edge to neutral (no cascade to opposite edge)
+- **Click and drag** — drag away from the hotspot in a direction to set the edge state; release to commit. The drag direction is interpreted relative to the edge:
+  - Away from palette center → outward
+  - Toward palette center → inward
+  - Along the edge (either direction) → lateral join
+  - Release within the dead zone (no drag) → neutral
+
+Other hotspots show a ghost preview of what they would be forced to during a drag, before you commit.
 
 The arrow meaning depends on which edge it's on. "Outward" means away from the palette center; "inward" means toward it.
 
@@ -63,7 +67,7 @@ Selecting an arrow on one edge may force the opposite to stay consistent:
 
 ### Corner adjacency (auto-join)
 
-If **3 or more edges** are pinched, any axis with both edges pinched is **forced joined** — because shared corners mean those poles are topologically the same point. The d-pad shows both inward and outward highlighted; clicking either resets to neutral.
+If **3 or more edges** are pinched, any axis with both edges pinched is **forced joined** — because shared corners mean those poles are topologically the same point. The hotspot shows ↕ (top/bottom) or ↔ (left/right) to indicate the forced join; clicking resets that edge to neutral.
 
 ### Navigation shortcuts
 
@@ -221,6 +225,9 @@ The forced-join rule for 3+ pinched edges is not merely a UI convenience — it 
 ## Implementation Notes
 
 - Arrow state is stored as `Arrows { top, bottom, left, right }` where each is `'up' | 'down' | 'left' | 'right' | 'none'`.
+- Each edge has a circular hotspot at its midpoint; click to clear, click-drag to set. A global `pointermove`/`pointerup` listener handles release outside the element.
+- During drag, `setArrow` is called speculatively to compute `previewArrows`, shown as ghost glyphs on non-dragged hotspots.
+- Forced-join axes display ↕ (V axis) or ↔ (H axis) instead of the arrow glyph.
 - `EdgeConfig` is derived from arrows via `arrowsToCfg()` and drives the SOM distance metric (`gridDistance`) and 3D mesh builder.
 - Mesh builders are keyed by topology string in `TOPOLOGY_MESH_BUILDERS`.
 - The SOM distance metric generates image positions for wrapped/twisted axes and through-pole paths for pinched ones.
