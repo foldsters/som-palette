@@ -13,6 +13,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
         app: resolve(__dirname, 'app/index.html'),
+        graph: resolve(__dirname, 'graph/index.html'),
       },
     },
   },

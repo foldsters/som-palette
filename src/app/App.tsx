@@ -1044,7 +1044,7 @@ export default function App() {
           <div>
             <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>MESH</div>
             <div style={{ width: 256, height: 256, background: '#0d0d0d' }}>
-              <Canvas camera={{ position: [0, 0, 1.2], fov: 45 }} gl={{ antialias: true }}>
+              <Canvas camera={{ position: [0, 0, 1.2], fov: 45 }} flat gl={{ antialias: true }}>
                 <TopoMeshScene
                   topologyKey={topologyKey}
                   cfg={cfg}
