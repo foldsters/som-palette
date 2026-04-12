@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, type PointerEvent as ReactPointerEvent } from 'react'
+import { useState, useRef, useCallback, useEffect, type PointerEvent as ReactPointerEvent } from 'react'
 import type { Graph } from './graphSOM'
 
 interface GraphEditorProps {
@@ -6,6 +6,7 @@ interface GraphEditorProps {
   colors: Float32Array | null
   size: number
   selectedNode: number | null
+  showVoronoi: boolean
   onSelectNode: (id: number | null) => void
   onBranchAt: (parentId: number, x: number, y: number) => void
   onDeleteNode: (id: number) => void
@@ -62,11 +63,19 @@ type DragMode =
 export default function GraphEditor({
   graph, colors, size, selectedNode,
   onSelectNode, onBranchAt, onDeleteNode, onMoveNode, onAddEdge, onDeleteEdge, onBatchDelete,
-  onDragStart, onDragEnd,
+  onDragStart, onDragEnd, showVoronoi,
 }: GraphEditorProps) {
   const svgRef = useRef<SVGSVGElement>(null)
+  const [modifierHeld, setModifierHeld] = useState(false)
   const [panX, setPanX] = useState(0)
   const [panY, setPanY] = useState(0)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => setModifierHeld(e.shiftKey || e.ctrlKey || e.metaKey)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKey)
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('keyup', onKey) }
+  }, [])
   const [zoom, setZoom] = useState(1)
   const dragRef = useRef<DragMode | null>(null)
   const [dragState, setDragState] = useState<DragMode | null>(null)
@@ -274,12 +283,54 @@ export default function GraphEditor({
   const edgeSource = edgeDrag ? graph.nodes.find(n => n.id === edgeDrag.sourceId) : null
   const cutState = dragState?.kind === 'cut' ? dragState : null
 
+  // ─── Voronoi background ─────────────────────────────────────────────────
+  const voronoiRef = useRef<HTMLCanvasElement>(null)
+
+  useEffect(() => {
+    const canvas = voronoiRef.current
+    if (!canvas || !showVoronoi || !colors || graph.nodes.length === 0) return
+    const ctx = canvas.getContext('2d')!
+    const w = canvas.width, h = canvas.height
+    const img = ctx.createImageData(w, h)
+    const data = img.data
+    // Map viewBox to pixel coords
+    const vw = size / zoom, vh = size / zoom
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const sx = panX + (px / w) * vw
+        const sy = panY + (py / h) * vh
+        // Find nearest node
+        let minDist = Infinity, nearest = 0
+        for (let i = 0; i < graph.nodes.length; i++) {
+          const n = graph.nodes[i]
+          const dx = n.x - sx, dy = n.y - sy
+          const d = dx * dx + dy * dy
+          if (d < minDist) { minDist = d; nearest = i }
+        }
+        const off = (py * w + px) * 4
+        data[off]     = Math.round(colors[nearest * 3] * 255)
+        data[off + 1] = Math.round(colors[nearest * 3 + 1] * 255)
+        data[off + 2] = Math.round(colors[nearest * 3 + 2] * 255)
+        data[off + 3] = 255
+      }
+    }
+    ctx.putImageData(img, 0, 0)
+  }, [showVoronoi, colors, graph.nodes, panX, panY, zoom, size])
+
   return (
+    <div style={{ position: 'relative', width: size, height: size, borderRadius: '4px', overflow: 'hidden' }}>
+    {showVoronoi && (
+      <canvas
+        ref={voronoiRef}
+        width={size} height={size}
+        style={{ position: 'absolute', top: 0, left: 0, width: size, height: size, imageRendering: 'pixelated' }}
+      />
+    )}
     <svg
       ref={svgRef}
       width={size} height={size}
       viewBox={`${panX} ${panY} ${size / zoom} ${size / zoom}`}
-      style={{ display: 'block', background: '#161616', borderRadius: '4px', cursor: dragState?.kind === 'pan' ? 'grabbing' : 'default' }}
+      style={{ position: 'relative', display: 'block', background: showVoronoi ? 'transparent' : '#161616', cursor: dragState?.kind === 'pan' ? 'grabbing' : 'default' }}
       onPointerDown={onPointerDownBg}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -287,8 +338,8 @@ export default function GraphEditor({
       onClick={onClickBackground}
       onContextMenu={onContextMenu}
     >
-      {/* Edges */}
-      {graph.edges.map(([a, b], i) => {
+      {/* Edges (hidden in voronoi mode unless modifier held) */}
+      {(!showVoronoi || modifierHeld) && graph.edges.map(([a, b], i) => {
         const na = graph.nodes.find(n => n.id === a)
         const nb = graph.nodes.find(n => n.id === b)
         if (!na || !nb) return null
@@ -357,5 +408,6 @@ export default function GraphEditor({
         />
       )}
     </svg>
+    </div>
   )
 }

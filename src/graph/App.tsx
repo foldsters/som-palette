@@ -34,6 +34,7 @@ export default function App() {
   const [colors, setColors]             = useState<Float32Array | null>(null)
   const [attribution, setAttribution]   = useState<string | null>(null)
   const [view, setView]                 = useState<'2d' | '3d'>('2d')
+  const [showVoronoi, setShowVoronoi]   = useState(false)
 
   const imageCanvasRef = useRef<HTMLCanvasElement>(null)
   const genRef         = useRef(0)
@@ -119,11 +120,21 @@ export default function App() {
 
   const viewRef = useRef(view)
   viewRef.current = view
+  const modifierRef = useRef(false)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { modifierRef.current = e.shiftKey || e.ctrlKey || e.metaKey }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKey)
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('keyup', onKey) }
+  }, [])
 
   useEffect(() => {
     let rafId: number
 
     function step() {
+      // Freeze layout while modifier key is held (shift for creation, ctrl for cut)
+      if (modifierRef.current) { rafId = requestAnimationFrame(step); return }
       const g = graphRef.current
       const c = colorsRef.current
       const is3D = viewRef.current === '3d'
@@ -355,6 +366,55 @@ export default function App() {
     URL.revokeObjectURL(link.href)
   }, [graph])
 
+  const exportVoronoi = useCallback(() => {
+    const c = colorsRef.current
+    if (!c || graph.nodes.length === 0) return
+    const S = 1024
+    const canvas = document.createElement('canvas')
+    canvas.width = S; canvas.height = S
+    const ctx = canvas.getContext('2d')!
+    const img = ctx.createImageData(S, S)
+    const data = img.data
+    // Compute bounding box with padding
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const n of graph.nodes) {
+      if (n.x < minX) minX = n.x
+      if (n.y < minY) minY = n.y
+      if (n.x > maxX) maxX = n.x
+      if (n.y > maxY) maxY = n.y
+    }
+    const PAD = 60
+    const rangeX = maxX - minX + PAD * 2 || 1
+    const rangeY = maxY - minY + PAD * 2 || 1
+    const scale = Math.max(rangeX, rangeY)
+    const ox = minX - PAD - (scale - rangeX) / 2
+    const oy = minY - PAD - (scale - rangeY) / 2
+
+    for (let py = 0; py < S; py++) {
+      for (let px = 0; px < S; px++) {
+        const sx = ox + (px / S) * scale
+        const sy = oy + (py / S) * scale
+        let minDist = Infinity, nearest = 0
+        for (let i = 0; i < graph.nodes.length; i++) {
+          const n = graph.nodes[i]
+          const dx = n.x - sx, dy = n.y - sy
+          const d = dx * dx + dy * dy
+          if (d < minDist) { minDist = d; nearest = i }
+        }
+        const off = (py * S + px) * 4
+        data[off]     = Math.round(c[nearest * 3] * 255)
+        data[off + 1] = Math.round(c[nearest * 3 + 1] * 255)
+        data[off + 2] = Math.round(c[nearest * 3 + 2] * 255)
+        data[off + 3] = 255
+      }
+    }
+    ctx.putImageData(img, 0, 0)
+    const link = document.createElement('a')
+    link.download = 'voronoi-palette.png'
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+  }, [graph])
+
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   const btnStyle: React.CSSProperties = {
@@ -405,6 +465,14 @@ export default function App() {
         >
           {view}
         </button>
+        {view === '2d' && (
+          <button
+            onClick={() => setShowVoronoi(v => !v)}
+            style={{ ...btnStyle, color: showVoronoi ? '#8d8' : '#666' }}
+          >
+            voronoi
+          </button>
+        )}
         <button onClick={() => setRedrawKey(k => k + 1)} style={btnStyle}>
           redraw
         </button>
@@ -426,6 +494,7 @@ export default function App() {
         <button onClick={exportGPL} disabled={!colors} style={btnStyle}>gpl</button>
         <button onClick={exportPNG} disabled={!colors} style={btnStyle}>png</button>
         <button onClick={exportSVG} disabled={!colors} style={btnStyle}>svg</button>
+        <button onClick={exportVoronoi} disabled={!colors} style={btnStyle}>voronoi</button>
         <button onClick={exportJSON} style={btnStyle}>json</button>
       </div>
 
@@ -456,6 +525,7 @@ export default function App() {
             colors={colors}
             size={EDITOR_SIZE}
             selectedNode={selectedNode}
+            showVoronoi={showVoronoi}
             onSelectNode={setSelectedNode}
             onBranchAt={handleBranchAt}
             onDeleteNode={handleDelete}
