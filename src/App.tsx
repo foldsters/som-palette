@@ -929,6 +929,7 @@ const handleExportPNG = useCallback(() => {
           {!colorSpaceCollapsed && <Canvas
             camera={{ position: [1.8, 1.4, 1.8], fov: 45 }}
             style={{ height: CANVAS_SIZE }}
+            flat
             gl={{ antialias: true }}
           >
             <ColorCube
@@ -1003,6 +1004,7 @@ const handleExportPNG = useCallback(() => {
           {!topologyCollapsed && <Canvas
             camera={{ position: [0, 0, 1.5], fov: 45 }}
             style={{ height: CANVAS_SIZE }}
+            flat
             gl={{ antialias: true }}
           >
             <TopologyScene
