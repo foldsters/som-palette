@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo, type PointerEvent as ReactPointerEvent } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
@@ -8,7 +8,7 @@ import { GLSOM } from './glSOM'
 import { NUDIBRANCHS } from './nudibranchs'
 
 const DEFAULT_ITERATIONS = 500
-const DISPLAY = 288  // palette display size in px
+const DISPLAY = 600  // palette display size in px
 
 // ─── SOM ─────────────────────────────────────────────────────────────────────
 
@@ -31,15 +31,21 @@ function runSOMBatch(
   rows: number, cols: number,
   fromIter: number, toIter: number, totalIter: number,
   cfg: EdgeConfig,
+  blendDecay = 0.5,
+  radiusDecay = 0.5,
 ) {
   const { width, height, data } = imageData
   const totalPx = width * height
   const maxRadius = Math.max(rows, cols) / 2
+  const blendExp  = Math.pow(10, 2 * blendDecay - 1)
+  const radiusExp = Math.pow(10, 2 * radiusDecay - 1)
 
   for (let iter = fromIter; iter < toIter; iter++) {
     const t      = iter / (totalIter - 1)
-    const lr     = 0.5 * Math.exp(-t * 4)
-    const sigma  = maxRadius * Math.exp(-t * 4) + 0.5
+    const tBlend  = Math.pow(t, blendExp)
+    const tRadius = Math.pow(t, radiusExp)
+    const lr     = 0.5 * (1 - tBlend)
+    const sigma  = maxRadius * (1 - tRadius) + 0.5
     const sigma2 = 2 * sigma * sigma
     const cutoff = sigma * 3
 
@@ -190,8 +196,8 @@ function setArrow(arrows: Arrows, edge: keyof Arrows, arrow: Arrow): Arrows {
   // (only trigger when the change was on the neutral axis, not when we're adjusting the pinched axis itself)
   const hNeutral = next.left === 'none' && next.right === 'none'
   const vNeutral = next.top  === 'none' && next.bottom === 'none'
-  const vBothPinched = (next.top  === 'up'   || next.top  === 'down') && (next.bottom === 'down' || next.bottom === 'up')
-  const hBothPinched = (next.left === 'left' || next.left === 'right') && (next.right === 'right' || next.right === 'left')
+  const vBothPinched = next.top === 'up' && next.bottom === 'down'
+  const hBothPinched = next.left === 'left' && next.right === 'right'
   const changingHAxis = edge === 'left' || edge === 'right'
   const changingVAxis = edge === 'top'  || edge === 'bottom'
   if (hNeutral && vBothPinched && changingHAxis) { next.top = 'up'; next.bottom = 'down' }
@@ -305,7 +311,7 @@ function TopoMeshScene({ topologyKey, cfg, paletteCanvasRef, paletteReady, offse
     const full = (geometry as any)._fullIndex as Uint32Array
     if (morphT === 0 || morphT === 1) {
       idx.set(full)
-      idx.count = full.length
+      ;(idx as any).count = full.length
     } else {
       const threshold = 0.42
       const filtered: number[] = []
@@ -318,7 +324,7 @@ function TopoMeshScene({ topologyKey, cfg, paletteCanvasRef, paletteReady, offse
         if (outside(a) || outside(b) || outside(c)) filtered.push(a, b, c)
       }
       for (let i = 0; i < full.length; i++) (idx.array as any)[i] = i < filtered.length ? filtered[i] : 0
-      idx.count = filtered.length
+      ;(idx as any).count = filtered.length
     }
     idx.needsUpdate = true
   }, [geometry, morphT])
@@ -392,6 +398,17 @@ export default function App() {
   const [offsetY, setOffsetY]           = useState(0)
   const [flipUV, setFlipUV]             = useState(false)
   const [morphT, setMorphT]             = useState(1)
+  type DragState = { edge: keyof Arrows; snapped: Arrow; dx: number; dy: number; cx: number; cy: number }
+  const [dragState, setDragState]       = useState<DragState | null>(null)
+  const dragRef                         = useRef<DragState | null>(null)
+  const gridDragRef                     = useRef<{ startX: number; startY: number; baseRows: number; baseCols: number } | null>(null)
+  const [gridDragging, setGridDragging] = useState(false)
+  const iterDragRef                     = useRef<{ startX: number; startY: number; baseQuality: number } | null>(null)
+  const [iterDragging, setIterDragging] = useState(false)
+  const [blendDecay, setBlendDecay]     = useState(0.5)
+  const [radiusDecay, setRadiusDecay]   = useState(0.5)
+  const decayDragRef                    = useRef<{ startX: number; startY: number; baseBlend: number; baseRadius: number } | null>(null)
+  const [decayDragging, setDecayDragging] = useState(false)
   const imageCanvasRef                  = useRef<HTMLCanvasElement>(null)
   const paletteCanvasRef                = useRef<HTMLCanvasElement>(null)
   const genRef                          = useRef(0)
@@ -471,7 +488,7 @@ export default function App() {
         const canvas = paletteCanvasRef.current
         if (canvas) renderPalette(canvas, gl.cpuMirror, rows, cols)
       } else {
-        runSOMBatch(palette, imageData!, rows, cols, iter, to, iterations, cfg)
+        runSOMBatch(palette, imageData!, rows, cols, iter, to, iterations, cfg, blendDecay, radiusDecay)
         const canvas = paletteCanvasRef.current
         if (canvas) renderPalette(canvas, palette, rows, cols)
       }
@@ -488,21 +505,158 @@ export default function App() {
 
     rafId = requestAnimationFrame(tick)
     return () => { cancelAnimationFrame(rafId); ++genRef.current }
-  }, [imageData, cfg, rows, cols, iterations, redrawKey, useGPU])
+  }, [imageData, cfg, rows, cols, iterations, redrawKey, useGPU, blendDecay, radiusDecay])
 
   // ─── Edge interaction ───────────────────────────────────────────────────────
 
+  // Global pointer handlers: track drag position and commit on release anywhere
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      // Export drag
+      const ed = exportDragRef.current
+      if (ed) {
+        const dy = e.clientY - ed.startY
+        ed.dy = dy
+        setExportDragY(dy)
+        return
+      }
+      // Decay drag
+      const dd = decayDragRef.current
+      if (dd) {
+        const PX_PER_UNIT = 120
+        setBlendDecay(Math.max(0, Math.min(1, dd.baseBlend + (e.clientX - dd.startX) / PX_PER_UNIT)))
+        setRadiusDecay(Math.max(0, Math.min(1, dd.baseRadius + (e.clientY - dd.startY) / PX_PER_UNIT)))
+        return
+      }
+      // Iter drag
+      const id = iterDragRef.current
+      if (id) {
+        const PX_PER_STEP = 8
+        const delta = (e.clientX - id.startX + e.clientY - id.startY) / PX_PER_STEP * 0.1
+        const quality = Math.max(0, Math.min(10, id.baseQuality + delta))
+        setIterations(Math.max(1, Math.round(Math.pow(10, quality / 2))))
+        return
+      }
+      // Grid size drag
+      const gd = gridDragRef.current
+      if (gd) {
+        const PX_PER_STEP = 20
+        const pow2 = (base: number, steps: number) => {
+          const exp = Math.round(Math.log2(base)) + steps
+          return Math.pow(2, Math.max(0, Math.min(12, exp)))  // 1..4096
+        }
+        const dc = Math.round((e.clientX - gd.startX) / PX_PER_STEP)
+        const dr = Math.round((e.clientY - gd.startY) / PX_PER_STEP)
+        setCols(pow2(gd.baseCols, dc))
+        setRows(pow2(gd.baseRows, dr))
+        return
+      }
+      const ds = dragRef.current
+      if (!ds) return
+      const { cx, cy, edge } = ds
+      const ddx = e.clientX - cx
+      const ddy = e.clientY - cy
+      const snapped = (() => {
+        const DEAD = 12
+        const mag = Math.sqrt(ddx * ddx + ddy * ddy)
+        if (mag < DEAD) return 'none' as Arrow
+        let out: number, lat: number
+        if (edge === 'top')         { out = -ddy; lat = ddx }
+        else if (edge === 'bottom') { out = ddy;  lat = ddx }
+        else if (edge === 'left')   { out = -ddx; lat = ddy }
+        else                        { out = ddx;  lat = ddy }
+        if (Math.abs(out) >= Math.abs(lat)) return out > 0 ? OUTWARD[edge] : INWARD[edge]
+        if (edge === 'top' || edge === 'bottom') return lat < 0 ? 'left' as Arrow : 'right' as Arrow
+        return lat < 0 ? 'up' as Arrow : 'down' as Arrow
+      })()
+      const next = { ...ds, snapped, dx: ddx, dy: ddy }
+      dragRef.current = next
+      setDragState(next)
+    }
+    const onUp = () => {
+      if (exportDragRef.current) {
+        const dy = exportDragRef.current.dy
+        exportDragRef.current = null
+        setExportDragY(null)
+        if (dy > 30 && dy <= 90) exportPNG()
+        else if (dy > 90) exportGPL()
+        return
+      }
+      if (decayDragRef.current) { decayDragRef.current = null; setDecayDragging(false); return }
+      if (iterDragRef.current) { iterDragRef.current = null; setIterDragging(false); return }
+      if (gridDragRef.current) { gridDragRef.current = null; setGridDragging(false); return }
+      const ds = dragRef.current
+      if (!ds) return
+      dragRef.current = null
+      setDragState(null)
+      const { edge, snapped, dx, dy } = ds
+      if (dx === 0 && dy === 0) {
+        // Pure click: force this edge to neutral, no cascade
+        setArrows(a => ({ ...a, [edge]: 'none' }))
+      } else {
+        const forced = (edge === 'left' || edge === 'right')
+          ? (cfg.left === 'pinched' && cfg.right === 'pinched' && (cfg.top === 'pinched' || cfg.bottom === 'pinched' || cfg.vJoin === 'twist'))
+          : (cfg.top  === 'pinched' && cfg.bottom === 'pinched' && (cfg.left === 'pinched' || cfg.right === 'pinched' || cfg.hJoin === 'twist'))
+        if (forced && (snapped === INWARD[edge] || snapped === OUTWARD[edge])) {
+          setArrows(a => setArrow(a, edge, 'none'))
+        } else {
+          setArrows(a => setArrow(a, edge, snapped))
+        }
+      }
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [cfg])
+
+  // ─── Export ─────────────────────────────────────────────────────────────────
+
+  const exportPNG = useCallback(() => {
+    const canvas = paletteCanvasRef.current
+    if (!canvas) return
+    const link = document.createElement('a')
+    link.download = 'palette.png'
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+  }, [])
+
+  const exportGPL = useCallback(() => {
+    const canvas = paletteCanvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const { width: c, height: r } = canvas
+    const px = ctx.getImageData(0, 0, c, r).data
+    const lines = ['GIMP Palette', 'Name: SOM Palette', `Columns: ${c}`, '#']
+    for (let i = 0; i < r * c; i++) {
+      const ri = px[i*4], gi = px[i*4+1], bi = px[i*4+2]
+      lines.push(`${ri.toString().padStart(3)} ${gi.toString().padStart(3)} ${bi.toString().padStart(3)}\tUntitled`)
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
+    const link = document.createElement('a')
+    link.download = 'palette.gpl'
+    link.href = URL.createObjectURL(blob)
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }, [])
+
+  // Export drag handle state — drag distance maps to menu item selection
+  const [exportDragY, setExportDragY] = useState<number | null>(null)
+  const exportDragRef = useRef<{ startY: number; dy: number } | null>(null)
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div style={{ minHeight: '100vh', background: '#111', color: '#ccc', padding: '24px', fontFamily: 'monospace' }}>
+    <div style={{ minHeight: '100vh', background: '#111', color: '#ccc', padding: '24px', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
       <div style={{ fontSize: '10px', letterSpacing: '0.15em', color: '#444', marginBottom: '16px' }}>
         SOM PALETTE · TOPOLOGY SANDBOX
       </div>
 
       {/* Controls */}
-      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '24px' }}>
+      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '24px', justifyContent: 'center' }}>
         {([
           { label: 'ROWS', value: rowsInput, set: setRowsInput, commit: (v: number) => { if (v > 0) setRows(v) } },
           { label: 'COLS', value: colsInput, set: setColsInput, commit: (v: number) => { if (v > 0) setCols(v) } },
@@ -559,22 +713,7 @@ export default function App() {
       </div>
 
 
-      <div style={{ display: 'flex', gap: '40px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
-
-        {/* Source image */}
-        <div>
-          <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>SOURCE</div>
-          <canvas
-            ref={imageCanvasRef}
-            width={256} height={256}
-            style={{ display: 'block', width: 256, height: 256 }}
-          />
-          {attribution && (
-            <div style={{ marginTop: '4px', fontSize: '8px', color: '#444', width: 256 }}>
-              {attribution}
-            </div>
-          )}
-        </div>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '32px' }}>
 
         {/* Palette + edge arrows */}
         <div>
@@ -582,20 +721,8 @@ export default function App() {
             PALETTE
           </div>
 
-          {/* 3×3 grid: d-pad selectors + canvas */}
+          {/* Palette canvas with edge hotspots */}
           {(() => {
-            const S = 52  // d-pad cell size px
-            const B = 16  // d-pad button size px
-
-            // D-pad: 3×3 grid with 5 active squares in + pattern
-            // For each edge, the 5 arrows it can take, mapped to d-pad positions
-            const DPAD_LAYOUT: Record<keyof Arrows, Partial<Record<Arrow, [number, number]>>> = {
-              top:    { up: [0,1], left: [1,0], none: [1,1], right: [1,2], down: [2,1] },
-              bottom: { up: [0,1], left: [1,0], none: [1,1], right: [1,2], down: [2,1] },
-              left:   { up: [0,1], left: [1,0], none: [1,1], right: [1,2], down: [2,1] },
-              right:  { up: [0,1], left: [1,0], none: [1,1], right: [1,2], down: [2,1] },
-            }
-
             const hAutoId = (cfg.left === 'pinched' && cfg.right === 'pinched' && (cfg.top === 'pinched' || cfg.bottom === 'pinched'))
                          || (cfg.left === 'pinched' && cfg.right === 'pinched' && cfg.vJoin === 'twist')
             const vAutoId = (cfg.top  === 'pinched' && cfg.bottom === 'pinched' && (cfg.left === 'pinched' || cfg.right === 'pinched'))
@@ -603,82 +730,286 @@ export default function App() {
             const autoJoined = (edge: keyof Arrows) =>
               (edge === 'left' || edge === 'right') ? hAutoId : vAutoId
 
-            const DPad = ({ edge }: { edge: keyof Arrows }) => {
-              const layout = DPAD_LAYOUT[edge]
-              const current = arrows[edge]
-              // Auto-join: this edge's axis is forced joined by corner adjacency
-              const forced = autoJoined(edge)
-              const cells: React.ReactNode[] = []
-              for (let r = 0; r < 3; r++) {
-                for (let c = 0; c < 3; c++) {
-                  const arrow = Object.entries(layout).find(([, pos]) => pos[0] === r && pos[1] === c)?.[0] as Arrow | undefined
-                  if (!arrow) {
-                    cells.push(<div key={`${r}-${c}`} />)
-                  } else {
-                    // When forced: both inward and outward are highlighted; clicking either resets to none
-                    const isInOut = arrow === INWARD[edge] || arrow === OUTWARD[edge]
-                    const active = forced ? isInOut : current === arrow
-                    const onClick = forced && isInOut
-                      ? () => setArrows(a => setArrow(a, edge, 'none'))
-                      : () => setArrows(a => setArrow(a, edge, current === arrow ? 'none' : arrow))
-                    cells.push(
-                      <div
-                        key={`${r}-${c}`}
-                        onClick={onClick}
-                        style={{
-                          width: B, height: B,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          cursor: 'pointer',
-                          background: active ? '#2a3a2a' : '#1a1a1a',
-                          border: `1px solid ${active ? '#4a6a4a' : '#222'}`,
-                          borderRadius: '2px',
-                          color: active ? '#8d8' : '#444',
-                          fontSize: '9px',
-                          userSelect: 'none' as const,
-                        }}
-                      >
-                        {ARROW_GLYPH[arrow === 'none' ? 'none' : arrow]}
-                      </div>
-                    )
-                  }
-                }
+            // Speculatively apply the drag's snapped arrow to get preview arrows for other edges
+            const previewArrows: Arrows | null = (() => {
+              if (!dragState) return null
+              const { edge, snapped } = dragState
+              // If the dragged edge is forced-joined and snapped is inward/outward, commit clears to neutral
+              const draggedForced = autoJoined(edge)
+              if (draggedForced && (snapped === INWARD[edge] || snapped === OUTWARD[edge])) {
+                return { ...arrows, [edge]: 'none' }
               }
+              return setArrow(arrows, edge, snapped)
+            })()
+            const previewCfg = previewArrows ? arrowsToCfg(previewArrows) : null
+
+            const HOTSPOT_R = 26  // radius px
+            const HOTSPOT_POS: Record<keyof Arrows, { top?: string; bottom?: string; left?: string; right?: string; transform: string }> = {
+              top:    { top: '0px',    left: '50%', transform: 'translate(-50%, -50%)' },
+              bottom: { bottom: '0px', left: '50%', transform: 'translate(-50%, 50%)' },
+              left:   { left: '0px',   top: '50%',  transform: 'translate(-50%, -50%)' },
+              right:  { right: '0px',  top: '50%',  transform: 'translate(50%, -50%)' },
+            }
+
+            const EdgeHotspot = ({ edge }: { edge: keyof Arrows }) => {
+              const committed = arrows[edge]
+              const isDragging = dragState?.edge === edge
+
+              // What this edge would show after commit (preview for non-dragged edges)
+              const preview = previewArrows ? previewArrows[edge] : committed
+              const isGhost = !isDragging && previewArrows !== null && preview !== committed
+
+              // Forced-join: this axis is auto-joined
+              const forced = autoJoined(edge)
+              // For forced-join, derive from preview cfg (or committed cfg if no drag)
+              const pc = previewCfg ?? cfg
+              const displayForced = (edge === 'left' || edge === 'right')
+                ? (pc.left === 'pinched' && pc.right === 'pinched' && (pc.top === 'pinched' || pc.bottom === 'pinched' || pc.vJoin === 'twist'))
+                : (pc.top === 'pinched' && pc.bottom === 'pinched' && (pc.left === 'pinched' || pc.right === 'pinched' || pc.hJoin === 'twist'))
+
+              // Glyph to display
+              // Forced-join: show ↕ or ↔
+              // Dragging: show snapped arrow
+              // Ghost (forced by drag): show preview arrow
+              // Normal: show committed arrow
+              let glyph: string
+              if (displayForced) {
+                glyph = (edge === 'left' || edge === 'right') ? '↔' : '↕'
+              } else if (isDragging) {
+                glyph = ARROW_GLYPH[dragState!.snapped]
+              } else {
+                glyph = ARROW_GLYPH[preview]
+              }
+
+              const isActive = displayForced || preview !== 'none'
+
+              // Colors
+              const color = isDragging ? '#bdb' : isGhost ? '#7a9' : isActive ? '#8d8' : '#333'
+              const bg    = isDragging ? '#1e2e1e' : isGhost ? '#1a2520' : isActive ? '#1a2a1a' : '#161616'
+              const border = isDragging ? '#5a8a5a' : isGhost ? '#3a6050' : isActive ? '#3a5a3a' : '#2a2a2a'
+
+              const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
+                e.stopPropagation()
+                const rect = e.currentTarget.getBoundingClientRect()
+                const cx = rect.left + rect.width / 2
+                const cy = rect.top + rect.height / 2
+                const ds = { edge, snapped: committed, dx: 0, dy: 0, cx, cy }
+                dragRef.current = ds
+                setDragState(ds)
+              }
+
+              const R = HOTSPOT_R
+              const lineLen = isDragging ? Math.min(Math.sqrt(dragState!.dx**2 + dragState!.dy**2), R * 2.5) : 0
+              const lineAngle = isDragging ? Math.atan2(dragState!.dy, dragState!.dx) : 0
+              const lx = isDragging ? Math.cos(lineAngle) * lineLen : 0
+              const ly = isDragging ? Math.sin(lineAngle) * lineLen : 0
+
               return (
-                <div style={{ display: 'grid', gridTemplateColumns: `repeat(3, ${B}px)`, gridTemplateRows: `repeat(3, ${B}px)`, gap: '2px' }}>
-                  {cells}
-                </div>
+                <svg
+                  width={R * 2} height={R * 2}
+                  viewBox={`${-R} ${-R} ${R * 2} ${R * 2}`}
+                  style={{
+                    position: 'absolute',
+                    cursor: 'crosshair',
+                    overflow: 'visible',
+                    ...HOTSPOT_POS[edge],
+                    zIndex: isDragging ? 10 : 1,
+                  }}
+                  onPointerDown={onPointerDown}
+                >
+                  {/* Drag line */}
+                  {isDragging && lineLen > 0 && (
+                    <line x1={0} y1={0} x2={lx} y2={ly} stroke="#5a8a5a" strokeWidth={1.5} strokeLinecap="round" />
+                  )}
+                  {/* Circle */}
+                  <circle cx={0} cy={0} r={R - 1} fill={bg} stroke={border} strokeWidth={isGhost ? 1 : 1} strokeDasharray={isGhost ? '2 2' : undefined} />
+                  {/* Glyph */}
+                  {glyph === '·'
+                    ? <circle cx={0} cy={0} r={3} fill={color} style={{ pointerEvents: 'none' }} />
+                    : <text x={0} y={-4} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={48} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        {glyph}
+                      </text>
+                  }
+                </svg>
               )
             }
 
             return (
-              <div style={{ display: 'grid', gridTemplateColumns: `${S}px ${DISPLAY}px ${S}px`, gridTemplateRows: `${S}px ${DISPLAY}px ${S}px` }}>
-                {/* TL corner */}
-                <div />
-                {/* Top d-pad */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <DPad edge="top" />
-                </div>
-                {/* TR corner */}
-                <div />
-                {/* Left d-pad */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <DPad edge="left" />
-                </div>
-                {/* Palette canvas */}
+              <div style={{ position: 'relative', width: DISPLAY, height: DISPLAY }}>
                 <canvas ref={paletteCanvasRef} width={cols} height={rows}
                   style={{ display: 'block', width: DISPLAY, height: DISPLAY, imageRendering: 'pixelated' }} />
-                {/* Right d-pad */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <DPad edge="right" />
-                </div>
-                {/* BL corner */}
-                <div />
-                {/* Bottom d-pad */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <DPad edge="bottom" />
-                </div>
-                {/* BR corner */}
-                <div />
+                {/* Iteration drag handle — top right corner */}
+                {(() => {
+                  const R = 26
+                  const bg = iterDragging ? '#1e2e1e' : '#161616'
+                  const border = iterDragging ? '#5a8a5a' : '#2a2a2a'
+                  const color = iterDragging ? '#bdb' : '#555'
+                  const label = iterations >= 1000 ? `${(iterations/1000).toFixed(iterations >= 10000 ? 0 : 1)}k` : String(iterations)
+                  return (
+                    <svg
+                      width={R * 2} height={R * 2}
+                      viewBox={`${-R} ${-R} ${R * 2} ${R * 2}`}
+                      style={{
+                        position: 'absolute', top: 0, left: 0,
+                        transform: 'translate(-50%, -50%)',
+                        cursor: 'nesw-resize',
+                        overflow: 'visible',
+                        zIndex: 1,
+                      }}
+                      onPointerDown={e => {
+                        e.stopPropagation()
+                        const baseQuality = Math.log10(iterations) * 2
+                        iterDragRef.current = { startX: e.clientX, startY: e.clientY, baseQuality }
+                        setIterDragging(true)
+                      }}
+                    >
+                      <circle cx={0} cy={0} r={R - 1} fill={bg} stroke={border} strokeWidth={1} />
+                      <text x={0} y={-4} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={9} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        iter
+                      </text>
+                      <text x={0} y={7} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={9} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        {label}
+                      </text>
+                    </svg>
+                  )
+                })()}
+                <EdgeHotspot edge="top" />
+                <EdgeHotspot edge="bottom" />
+                <EdgeHotspot edge="left" />
+                <EdgeHotspot edge="right" />
+                {/* Export drag handle — top right corner */}
+                {(() => {
+                  const R = 26
+                  const isDragging = exportDragY !== null
+                  const dy = exportDragY ?? 0
+                  // Item 1: PNG at 30–90px, Item 2: GPL at 90+px
+                  const activeItem = dy > 90 ? 1 : dy > 30 ? 0 : -1
+                  const ITEMS = ['png', 'gpl']
+                  const bg = isDragging ? '#1e2e1e' : '#161616'
+                  const border = isDragging ? '#5a8a5a' : '#2a2a2a'
+                  const color = isDragging ? '#bdb' : '#555'
+                  return (
+                    <svg
+                      width={R * 2} height={R * 2}
+                      viewBox={`${-R} ${-R} ${R * 2} ${R * 2}`}
+                      style={{
+                        position: 'absolute', top: 0, right: 0,
+                        transform: 'translate(50%, -50%)',
+                        cursor: 'ns-resize',
+                        overflow: 'visible',
+                        zIndex: isDragging ? 10 : 1,
+                      }}
+                      onPointerDown={e => {
+                        e.stopPropagation()
+                        exportDragRef.current = { startY: e.clientY, dy: 0 }
+                        setExportDragY(0)
+                      }}
+                    >
+                      {/* Sliding menu items */}
+                      {isDragging && ITEMS.map((label, i) => {
+                        const itemY = (i + 1) * 64
+                        const isActive = activeItem === i
+                        return (
+                          <g key={label} transform={`translate(0, ${itemY})`}>
+                            <circle cx={0} cy={0} r={R - 1}
+                              fill={isActive ? '#1e3e1e' : '#161616'}
+                              stroke={isActive ? '#5a8a5a' : '#333'}
+                              strokeWidth={1} />
+                            <text x={0} y={0} textAnchor="middle" dominantBaseline="central"
+                              fill={isActive ? '#bdb' : '#555'} fontSize={9} fontFamily="monospace"
+                              style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                              {label}
+                            </text>
+                          </g>
+                        )
+                      })}
+                      {/* Drag line */}
+                      {isDragging && dy > 0 && (
+                        <line x1={0} y1={0} x2={0} y2={Math.min(dy, 90 + R)} stroke="#5a8a5a" strokeWidth={1.5} strokeLinecap="round" />
+                      )}
+                      {/* Main circle */}
+                      <circle cx={0} cy={0} r={R - 1} fill={bg} stroke={border} strokeWidth={1} />
+                      <text x={0} y={0} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={9} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        export
+                      </text>
+                    </svg>
+                  )
+                })()}
+                {/* Decay drag handle — bottom left corner */}
+                {(() => {
+                  const R = 26
+                  const bg = decayDragging ? '#1e2e1e' : '#161616'
+                  const border = decayDragging ? '#5a8a5a' : '#2a2a2a'
+                  const color = decayDragging ? '#bdb' : '#555'
+                  return (
+                    <svg
+                      width={R * 2} height={R * 2}
+                      viewBox={`${-R} ${-R} ${R * 2} ${R * 2}`}
+                      style={{
+                        position: 'absolute', bottom: 0, left: 0,
+                        transform: 'translate(-50%, 50%)',
+                        cursor: 'move',
+                        overflow: 'visible',
+                        zIndex: 1,
+                      }}
+                      onPointerDown={e => {
+                        e.stopPropagation()
+                        decayDragRef.current = { startX: e.clientX, startY: e.clientY, baseBlend: blendDecay, baseRadius: radiusDecay }
+                        setDecayDragging(true)
+                      }}
+                    >
+                      <circle cx={0} cy={0} r={R - 1} fill={bg} stroke={border} strokeWidth={1} />
+                      <text x={0} y={-4} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={8} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        b{blendDecay.toFixed(1)}
+                      </text>
+                      <text x={0} y={7} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={8} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        r{radiusDecay.toFixed(1)}
+                      </text>
+                    </svg>
+                  )
+                })()}
+                {/* Grid size drag handle — bottom right corner */}
+                {(() => {
+                  const R = 26
+                  const isGridDragging = gridDragging
+                  const bg = isGridDragging ? '#1e2e1e' : '#161616'
+                  const border = isGridDragging ? '#5a8a5a' : '#2a2a2a'
+                  const color = isGridDragging ? '#bdb' : '#555'
+                  return (
+                    <svg
+                      width={R * 2} height={R * 2}
+                      viewBox={`${-R} ${-R} ${R * 2} ${R * 2}`}
+                      style={{
+                        position: 'absolute', bottom: 0, right: 0,
+                        transform: 'translate(50%, 50%)',
+                        cursor: 'nwse-resize',
+                        overflow: 'visible',
+                        zIndex: 1,
+                      }}
+                      onPointerDown={e => {
+                        e.stopPropagation()
+                        gridDragRef.current = { startX: e.clientX, startY: e.clientY, baseRows: rows, baseCols: cols }
+                        setGridDragging(true)
+                      }}
+                    >
+                      <circle cx={0} cy={0} r={R - 1} fill={bg} stroke={border} strokeWidth={1} />
+                      <text x={0} y={-5} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={9} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        {cols}
+                      </text>
+                      <text x={0} y={7} textAnchor="middle" dominantBaseline="central"
+                        fill={color} fontSize={9} fontFamily="monospace" style={{ userSelect: 'none', pointerEvents: 'none' }}>
+                        {rows}
+                      </text>
+                    </svg>
+                  )
+                })()}
               </div>
             )
           })()}
@@ -691,40 +1022,60 @@ export default function App() {
           </div>
         </div>
 
-        {/* 3D mesh */}
-        <div>
-          <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>MESH</div>
-          <div style={{ width: DISPLAY, height: DISPLAY, background: '#0d0d0d' }}>
-            <Canvas camera={{ position: [0, 0, 1.2], fov: 45 }} gl={{ antialias: true }}>
-              <TopoMeshScene
-                topologyKey={topologyKey}
-                cfg={cfg}
-                paletteCanvasRef={paletteCanvasRef}
-                paletteReady={paletteReady}
-                offsetX={offsetX}
-                offsetY={offsetY}
-                flipUV={flipUV}
-                morphT={morphT}
-              />
-            </Canvas>
-          </div>
-          <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            {([['shape', morphT, setMorphT], ['U', offsetX, setOffsetX], ['V', offsetY, setOffsetY]] as const).map(([label, val, set]) => (
-              <div key={label} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span style={{ fontSize: '9px', color: '#444', width: '10px' }}>{label}</span>
-                <input
-                  type="range" min={0} max={1} step={0.001}
-                  value={val}
-                  onChange={e => set(parseFloat(e.target.value))}
-                  style={{ flex: 1, accentColor: '#555' }}
-                />
+        {/* Source + Mesh row */}
+        <div style={{ display: 'flex', gap: '40px', alignItems: 'flex-start' }}>
+
+          {/* Source image */}
+          <div>
+            <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>SOURCE</div>
+            <canvas
+              ref={imageCanvasRef}
+              width={256} height={256}
+              style={{ display: 'block', width: 256, height: 256 }}
+            />
+            {attribution && (
+              <div style={{ marginTop: '4px', fontSize: '8px', color: '#444', width: 256 }}>
+                {attribution}
               </div>
-            ))}
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '2px' }}>
-              <span style={{ fontSize: '9px', color: '#444', width: '10px' }} />
-              <button onClick={() => setFlipUV(f => !f)} style={segBtn(flipUV)}>flip u↔v</button>
+            )}
+          </div>
+
+          {/* 3D mesh */}
+          <div>
+            <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>MESH</div>
+            <div style={{ width: 256, height: 256, background: '#0d0d0d' }}>
+              <Canvas camera={{ position: [0, 0, 1.2], fov: 45 }} gl={{ antialias: true }}>
+                <TopoMeshScene
+                  topologyKey={topologyKey}
+                  cfg={cfg}
+                  paletteCanvasRef={paletteCanvasRef}
+                  paletteReady={paletteReady}
+                  offsetX={offsetX}
+                  offsetY={offsetY}
+                  flipUV={flipUV}
+                  morphT={morphT}
+                />
+              </Canvas>
+            </div>
+            <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              {([['shape', morphT, setMorphT], ['U', offsetX, setOffsetX], ['V', offsetY, setOffsetY]] as const).map(([label, val, set]) => (
+                <div key={label} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <span style={{ fontSize: '9px', color: '#444', width: '10px' }}>{label}</span>
+                  <input
+                    type="range" min={0} max={1} step={0.001}
+                    value={val}
+                    onChange={e => set(parseFloat(e.target.value))}
+                    style={{ flex: 1, accentColor: '#555', width: '200px' }}
+                  />
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '2px' }}>
+                <span style={{ fontSize: '9px', color: '#444', width: '10px' }} />
+                <button onClick={() => setFlipUV(f => !f)} style={segBtn(flipUV)}>flip u↔v</button>
+              </div>
             </div>
           </div>
+
         </div>
 
       </div>
