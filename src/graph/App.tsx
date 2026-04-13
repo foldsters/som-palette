@@ -3,6 +3,7 @@ import {
   type Graph,
   createGraph, addNodeAt, removeNode, addEdge, removeEdge, moveNode, batchDelete,
   computeDistanceMatrix, initGraphPalette, runGraphSOMBatch,
+  initGSOM, runGSOMBatch,
 } from './graphSOM'
 import GraphEditor from './GraphEditor'
 import GraphEditor3D from './GraphEditor3D'
@@ -35,6 +36,10 @@ export default function App() {
   const [attribution, setAttribution]   = useState<string | null>(null)
   const [view, setView]                 = useState<'2d' | '3d'>('2d')
   const [showVoronoi, setShowVoronoi]   = useState(false)
+  const [autoGrow, setAutoGrow]          = useState(false)
+  const [lattice, setLattice]           = useState(false)
+  const [maxNodes, setMaxNodes]         = useState(24)
+  const [branchFactor, setBranchFactor] = useState(2.5)
 
   const imageCanvasRef = useRef<HTMLCanvasElement>(null)
   const genRef         = useRef(0)
@@ -84,37 +89,61 @@ export default function App() {
   useEffect(() => {
     if (!imageData) return
 
-    const N = graph.nodes.length
-    const { matrix, diameter } = computeDistanceMatrix(graph)
-    const palette = initGraphPalette(imageData, N)
-
     const gen = ++genRef.current
     const batchSize = Math.max(1, Math.ceil(iterations / 120))
-    let iter = 0
     let rafId: number
     setRunning(true)
 
-    function tick() {
-      if (gen !== genRef.current) return
-      const to = Math.min(iter + batchSize, iterations)
-      runGraphSOMBatch(palette, imageData!, matrix, N, diameter, iter, to, iterations, blendDecay, radiusDecay)
+    if (autoGrow) {
+      // GSOM mode: start from 4 nodes, grow during training
+      let gsom = initGSOM(imageData, EDITOR_SIZE / 2, EDITOR_SIZE / 2, iterations)
 
-      const snap = new Float32Array(palette)
-      colorsRef.current = snap
-      setColors(snap)
+      function tickGSOM() {
+        if (gen !== genRef.current) return
+        gsom = runGSOMBatch(gsom, imageData!, batchSize, maxNodes, branchFactor, lattice, blendDecay, radiusDecay)
 
-      iter = to
-      if (iter < iterations) {
-        rafId = requestAnimationFrame(tick)
-      } else {
-        setRunning(false)
+        // Sync graph and colors to React state
+        setGraph(gsom.graph)
+        const snap = new Float32Array(gsom.palette)
+        colorsRef.current = snap
+        setColors(snap)
+
+        if (gsom.iter < gsom.totalIter) {
+          rafId = requestAnimationFrame(tickGSOM)
+        } else {
+          setRunning(false)
+        }
       }
+      rafId = requestAnimationFrame(tickGSOM)
+    } else {
+      // Standard graph SOM mode
+      const N = graph.nodes.length
+      const { matrix, diameter } = computeDistanceMatrix(graph)
+      const palette = initGraphPalette(imageData, N)
+      let iter = 0
+
+      function tick() {
+        if (gen !== genRef.current) return
+        const to = Math.min(iter + batchSize, iterations)
+        runGraphSOMBatch(palette, imageData!, matrix, N, diameter, iter, to, iterations, blendDecay, radiusDecay)
+
+        const snap = new Float32Array(palette)
+        colorsRef.current = snap
+        setColors(snap)
+
+        iter = to
+        if (iter < iterations) {
+          rafId = requestAnimationFrame(tick)
+        } else {
+          setRunning(false)
+        }
+      }
+      rafId = requestAnimationFrame(tick)
     }
 
-    rafId = requestAnimationFrame(tick)
     return () => { cancelAnimationFrame(rafId); ++genRef.current }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageData, getStructKey(graph), iterations, redrawKey, blendDecay, radiusDecay])
+  }, [imageData, autoGrow ? '' : getStructKey(graph), iterations, redrawKey, blendDecay, radiusDecay, autoGrow, maxNodes, branchFactor, lattice])
 
   // ─── Force-directed layout ────────────────────────────────────────────────
 
@@ -472,6 +501,40 @@ export default function App() {
           >
             voronoi
           </button>
+        )}
+        <button
+          onClick={() => setAutoGrow(v => !v)}
+          style={{ ...btnStyle, color: autoGrow ? '#8d8' : '#666' }}
+        >
+          gsom
+        </button>
+        {autoGrow && (
+          <>
+            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              NODES
+              <input
+                type="number" value={maxNodes} min={2}
+                onChange={e => { const v = parseInt(e.target.value); if (v >= 2) setMaxNodes(v) }}
+                style={{ width: '48px' }}
+              />
+            </label>
+            <button
+              onClick={() => setLattice(v => !v)}
+              style={{ ...btnStyle, color: lattice ? '#8d8' : '#666' }}
+            >
+              lattice
+            </button>
+            {!lattice && (
+              <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                BRANCH
+                <input type="range" min={2} max={5} step={0.1} value={branchFactor}
+                  onChange={e => setBranchFactor(parseFloat(e.target.value))}
+                  style={{ width: '50px' }}
+                />
+                <span style={{ fontSize: '8px', color: '#555', width: '20px' }}>{branchFactor.toFixed(1)}</span>
+              </label>
+            )}
+          </>
         )}
         <button onClick={() => setRedrawKey(k => k + 1)} style={btnStyle}>
           redraw
