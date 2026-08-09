@@ -8,6 +8,8 @@ import {
 import GraphEditor from './GraphEditor'
 import GraphEditor3D from './GraphEditor3D'
 import { NUDIBRANCHS } from '../app/nudibranchs'
+import { computeTargetPosition, VIZ_SPACES, type LayoutMode } from './layout'
+import type { VizSpace } from '../colorSpaces'
 
 const DEFAULT_ITERATIONS = 500
 const EDITOR_SIZE = 600
@@ -18,7 +20,6 @@ const IMG_SIZE = 200
 const REST_LENGTH = 100   // target edge length (px)
 const K_SPRING    = 0.08  // edge spring stiffness
 const K_REPEL     = 15000 // base repulsion strength
-const K_COLOR     = 8000  // extra repulsion from color distance
 const K_CENTER    = 0.003 // centering pull
 const STEP        = 0.8   // position update step size
 const MIN_DIST    = 1     // avoid division by zero
@@ -39,7 +40,10 @@ export default function App() {
   const [autoGrow, setAutoGrow]          = useState(false)
   const [lattice, setLattice]           = useState(false)
   const [maxNodes, setMaxNodes]         = useState(24)
+  const [maxNodesInput, setMaxNodesInput] = useState('24')
   const [branchFactor, setBranchFactor] = useState(2.5)
+  const [layoutMode, setLayoutMode]     = useState<LayoutMode>('graph')
+  const [vizSpace, setVizSpace]         = useState<VizSpace>('oklab')
 
   const imageCanvasRef = useRef<HTMLCanvasElement>(null)
   const genRef         = useRef(0)
@@ -149,6 +153,10 @@ export default function App() {
 
   const viewRef = useRef(view)
   viewRef.current = view
+  const layoutModeRef = useRef(layoutMode)
+  layoutModeRef.current = layoutMode
+  const vizSpaceRef = useRef(vizSpace)
+  vizSpaceRef.current = vizSpace
   const modifierRef = useRef(false)
 
   useEffect(() => {
@@ -169,6 +177,40 @@ export default function App() {
       const is3D = viewRef.current === '3d'
       const N = g.nodes.length
       if (N < 2) { rafId = requestAnimationFrame(step); return }
+
+      // ─── Semantic layout modes ──────────────────────────────────────────────
+      // Non-graph modes bypass the physics entirely: each node eases toward a
+      // target position that encodes meaning (its colour-space coordinate, etc).
+      const mode = layoutModeRef.current
+      if (mode !== 'graph') {
+        // Colours are needed to compute targets; bail to the next frame if the
+        // parallel colours array hasn't caught up to the node count (GSOM growth).
+        if (!c || c.length < N * 3) { rafId = requestAnimationFrame(step); return }
+        const cfg = { mode, space: vizSpaceRef.current }
+        const EASE = 0.14
+        const dragged = draggedRef.current
+        let moved = false
+        const newNodes = g.nodes.map((n, i) => {
+          if (n.id === dragged) return n
+          const t = computeTargetPosition(c[i * 3], c[i * 3 + 1], c[i * 3 + 2], cfg)
+          if (!t) return n
+          const tz = is3D ? t.z : 0   // flatten z in 2D, same as the physics path
+          const mx = (t.x - n.x) * EASE
+          const my = (t.y - n.y) * EASE
+          const mz = (tz - n.z) * EASE
+          if (Math.abs(mx) < 0.01 && Math.abs(my) < 0.01 && Math.abs(mz) < 0.01) return n
+          moved = true
+          return { ...n, x: n.x + mx, y: n.y + my, z: n.z + mz }
+        })
+        if (moved) {
+          setGraph(prev => {
+            if (prev !== graphRef.current) return prev
+            return { ...prev, nodes: newNodes }
+          })
+        }
+        rafId = requestAnimationFrame(step)
+        return
+      }
 
       // Accumulate forces per node
       const fx = new Float64Array(N)
@@ -200,15 +242,7 @@ export default function App() {
           const dx = nj.x - ni.x, dy = nj.y - ni.y, dz = nj.z - ni.z
           const dist = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz), MIN_DIST)
 
-          let colorDist = 1.0
-          if (c && i * 3 + 2 < c.length && j * 3 + 2 < c.length) {
-            const dr = c[i * 3] - c[j * 3]
-            const dg = c[i * 3 + 1] - c[j * 3 + 1]
-            const db = c[i * 3 + 2] - c[j * 3 + 2]
-            colorDist = Math.sqrt(dr * dr + dg * dg + db * db)
-          }
-
-          const repel = (K_REPEL + K_COLOR * colorDist) / (dist * dist)
+          const repel = K_REPEL / (dist * dist)
           const ux = dx / dist, uy = dy / dist, uz = dz / dist
           fx[i] -= repel * ux; fy[i] -= repel * uy; fz[i] -= repel * uz
           fx[j] += repel * ux; fy[j] += repel * uy; fz[j] += repel * uz
@@ -494,6 +528,29 @@ export default function App() {
         >
           {view}
         </button>
+        <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          LAYOUT
+          <select
+            value={layoutMode}
+            onChange={e => setLayoutMode(e.target.value as LayoutMode)}
+            style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+          >
+            <option value="graph">graph</option>
+            <option value="colorspace">colorspace</option>
+          </select>
+        </label>
+        {layoutMode === 'colorspace' && (
+          <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            SPACE
+            <select
+              value={vizSpace}
+              onChange={e => setVizSpace(e.target.value as VizSpace)}
+              style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+            >
+              {VIZ_SPACES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </label>
+        )}
         {view === '2d' && (
           <button
             onClick={() => setShowVoronoi(v => !v)}
@@ -513,8 +570,13 @@ export default function App() {
             <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
               NODES
               <input
-                type="number" value={maxNodes} min={2}
-                onChange={e => { const v = parseInt(e.target.value); if (v >= 2) setMaxNodes(v) }}
+                type="number" value={maxNodesInput}
+                onChange={e => {
+                  setMaxNodesInput(e.target.value)
+                  const v = parseInt(e.target.value)
+                  if (v >= 2) setMaxNodes(v)
+                }}
+                onBlur={() => setMaxNodesInput(String(maxNodes))}
                 style={{ width: '48px' }}
               />
             </label>
