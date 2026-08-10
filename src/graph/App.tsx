@@ -8,12 +8,23 @@ import {
 import GraphEditor from './GraphEditor'
 import GraphEditor3D from './GraphEditor3D'
 import { NUDIBRANCHS } from '../app/nudibranchs'
-import { computeTargetPosition, VIZ_SPACES, type LayoutMode } from './layout'
+import { computeTargetPosition, VIZ_SPACES, type LayoutMode, type Vec3 } from './layout'
 import type { VizSpace } from '../colorSpaces'
+import { GLSOM } from '../glSOM'
+import { runSOMBatch, renderPalette } from '../som'
 
 const DEFAULT_ITERATIONS = 500
 const EDITOR_SIZE = 600
 const IMG_SIZE = 200
+
+// ─── Surface (palletope render) mode ─────────────────────────────────────────
+const TOPOLOGIES = [
+  'rectangular', 'cylindrical', 'toroidal', 'spherical', 'hexagonal',
+  'projective', 'mobius', 'klein', 'cone', 'bicone',
+] as const
+type Topology = typeof TOPOLOGIES[number]
+const GRID_SIZES = [64, 128, 256, 512]
+const SURFACE_ITERS = 1500
 
 // ─── Force layout constants ─────────────────────────────────────────────────
 
@@ -44,6 +55,11 @@ export default function App() {
   const [branchFactor, setBranchFactor] = useState(2.5)
   const [layoutMode, setLayoutMode]     = useState<LayoutMode>('graph')
   const [vizSpace, setVizSpace]         = useState<VizSpace>('oklab')
+  const [showAxes, setShowAxes]         = useState(true)
+  const [topology, setTopology]         = useState<Topology>('rectangular')
+  const [gridSize, setGridSize]         = useState(512)
+  const [backdrop, setBackdrop]         = useState<string | null>(null)
+  const [surfaceRendering, setSurfaceRendering] = useState(false)
 
   const imageCanvasRef = useRef<HTMLCanvasElement>(null)
   const genRef         = useRef(0)
@@ -51,6 +67,16 @@ export default function App() {
   const draggedRef     = useRef<number | null>(null)
   const graphRef       = useRef(graph)
   graphRef.current = graph
+
+  // Surface-mode SOM render + per-node target cache (the nearest-colour scan is
+  // O(cols·rows) per node — far too heavy to run every animation frame).
+  const surfacePaletteRef      = useRef<Float32Array | null>(null)
+  const surfaceColsRef         = useRef(0)
+  const surfaceRowsRef         = useRef(0)
+  const surfaceGenRef          = useRef(0)
+  const surfTargetsRef         = useRef<(Vec3 | null)[]>([])
+  const surfTargetsColorsRef   = useRef<Float32Array | null>(null)
+  const surfTargetsPaletteRef  = useRef<Float32Array | null>(null)
 
   const getStructKey = (g: Graph) => `${g.nodes.map(n => n.id).join(',')};${g.edges.map(([a,b]) => `${a}-${b}`).join(',')}`
 
@@ -149,6 +175,64 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageData, autoGrow ? '' : getStructKey(graph), iterations, redrawKey, blendDecay, radiusDecay, autoGrow, maxNodes, branchFactor, lattice])
 
+  // Surface mode is a flat 2D render — 3D adds nothing, so force the 2D view.
+  useEffect(() => { if (layoutMode === 'surface') setView('2d') }, [layoutMode])
+
+  // ─── Surface (palletope render) SOM ─────────────────────────────────────────
+  // Trains an independent SOM at gridSize×gridSize under the chosen topology and
+  // renders it as the backdrop nodes snap onto. Rebuilds ONLY on image / topology
+  // / size change (never on graph edits), and never runs unless surface mode is on.
+  useEffect(() => {
+    if (!imageData || layoutMode !== 'surface') return
+
+    const gen = ++surfaceGenRef.current
+    const cols = gridSize, rows = gridSize
+    const batch = Math.max(1, Math.ceil(SURFACE_ITERS / 200))
+    setSurfaceRendering(true)
+    surfacePaletteRef.current = null   // invalidate snap targets while rebuilding
+
+    const useGPU = GLSOM.isSupported()
+    let glsom: GLSOM | null = null
+    let cpuPalette: Float32Array | null = null
+    if (useGPU) {
+      glsom = new GLSOM()
+      glsom.init(rows, cols)
+    } else {
+      cpuPalette = new Float32Array(rows * cols * 3)  // starts black
+    }
+
+    let iter = 0
+    let rafId = requestAnimationFrame(function tick() {
+      if (gen !== surfaceGenRef.current) return
+      const to = Math.min(iter + batch, SURFACE_ITERS)
+      if (glsom) {
+        glsom.runBatch(imageData!, iter, to, SURFACE_ITERS, 0.5, 0.5, topology, true)
+      } else if (cpuPalette) {
+        runSOMBatch(cpuPalette, imageData!, rows, cols, iter, to, SURFACE_ITERS, 0.5, 0.5, topology, true)
+      }
+      iter = to
+      if (iter < SURFACE_ITERS) { rafId = requestAnimationFrame(tick); return }
+
+      // Done — pull the trained grid and render the backdrop.
+      if (glsom) { glsom.flush(); cpuPalette = new Float32Array(glsom.cpuMirror) }
+      const pal = cpuPalette!
+      surfacePaletteRef.current = pal
+      surfaceColsRef.current = cols
+      surfaceRowsRef.current = rows
+      surfTargetsColorsRef.current = null   // force target recompute against new grid
+
+      const canvas = document.createElement('canvas')
+      canvas.width = cols; canvas.height = rows
+      renderPalette(canvas, pal, rows, cols)
+      setBackdrop(canvas.toDataURL('image/png'))
+      setSurfaceRendering(false)
+      glsom?.dispose()
+    })
+
+    return () => { cancelAnimationFrame(rafId); ++surfaceGenRef.current; glsom?.dispose() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageData, topology, gridSize, layoutMode])
+
   // ─── Force-directed layout ────────────────────────────────────────────────
 
   const viewRef = useRef(view)
@@ -186,13 +270,32 @@ export default function App() {
         // Colours are needed to compute targets; bail to the next frame if the
         // parallel colours array hasn't caught up to the node count (GSOM growth).
         if (!c || c.length < N * 3) { rafId = requestAnimationFrame(step); return }
+
+        // Surface mode: cache each node's nearest-colour target. The BMU scan is
+        // O(cols·rows) per node, so only rescan when the colours array or the SOM
+        // grid changes — not every frame.
+        let surfaceTargets: (Vec3 | null)[] | null = null
+        if (mode === 'surface') {
+          const sp = surfacePaletteRef.current
+          if (!sp) { rafId = requestAnimationFrame(step); return }
+          if (c !== surfTargetsColorsRef.current || sp !== surfTargetsPaletteRef.current || surfTargetsRef.current.length !== N) {
+            const scfg = { mode, space: vizSpaceRef.current, surface: { palette: sp, cols: surfaceColsRef.current, rows: surfaceRowsRef.current } }
+            const arr: (Vec3 | null)[] = new Array(N)
+            for (let i = 0; i < N; i++) arr[i] = computeTargetPosition(c[i * 3], c[i * 3 + 1], c[i * 3 + 2], scfg)
+            surfTargetsRef.current = arr
+            surfTargetsColorsRef.current = c
+            surfTargetsPaletteRef.current = sp
+          }
+          surfaceTargets = surfTargetsRef.current
+        }
+
         const cfg = { mode, space: vizSpaceRef.current }
         const EASE = 0.14
         const dragged = draggedRef.current
         let moved = false
         const newNodes = g.nodes.map((n, i) => {
           if (n.id === dragged) return n
-          const t = computeTargetPosition(c[i * 3], c[i * 3 + 1], c[i * 3 + 2], cfg)
+          const t = surfaceTargets ? surfaceTargets[i] : computeTargetPosition(c[i * 3], c[i * 3 + 1], c[i * 3 + 2], cfg)
           if (!t) return n
           const tz = is3D ? t.z : 0   // flatten z in 2D, same as the physics path
           const mx = (t.x - n.x) * EASE
@@ -523,8 +626,10 @@ export default function App() {
           />
         </label>
         <button
-          onClick={() => setView(v => v === '2d' ? '3d' : '2d')}
-          style={{ ...btnStyle, color: '#8d8' }}
+          onClick={() => { if (layoutMode !== 'surface') setView(v => v === '2d' ? '3d' : '2d') }}
+          disabled={layoutMode === 'surface'}
+          title={layoutMode === 'surface' ? 'surface mode is 2D only' : undefined}
+          style={{ ...btnStyle, color: layoutMode === 'surface' ? '#444' : '#8d8', cursor: layoutMode === 'surface' ? 'default' : 'pointer' }}
         >
           {view}
         </button>
@@ -537,19 +642,53 @@ export default function App() {
           >
             <option value="graph">graph</option>
             <option value="colorspace">colorspace</option>
+            <option value="surface">surface</option>
           </select>
         </label>
         {layoutMode === 'colorspace' && (
-          <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
-            SPACE
-            <select
-              value={vizSpace}
-              onChange={e => setVizSpace(e.target.value as VizSpace)}
-              style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+          <>
+            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              SPACE
+              <select
+                value={vizSpace}
+                onChange={e => setVizSpace(e.target.value as VizSpace)}
+                style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+              >
+                {VIZ_SPACES.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </label>
+            <button
+              onClick={() => setShowAxes(a => !a)}
+              style={{ ...btnStyle, color: showAxes ? '#8d8' : '#666' }}
             >
-              {VIZ_SPACES.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </label>
+              axes
+            </button>
+          </>
+        )}
+        {layoutMode === 'surface' && (
+          <>
+            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              TOPOLOGY
+              <select
+                value={topology}
+                onChange={e => setTopology(e.target.value as Topology)}
+                style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+              >
+                {TOPOLOGIES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </label>
+            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              SIZE
+              <select
+                value={gridSize}
+                onChange={e => setGridSize(parseInt(e.target.value))}
+                style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+              >
+                {GRID_SIZES.map(s => <option key={s} value={s}>{s}²</option>)}
+              </select>
+            </label>
+            {surfaceRendering && <span style={{ fontSize: '9px', color: '#a95' }}>rendering…</span>}
+          </>
         )}
         {view === '2d' && (
           <button
@@ -651,6 +790,10 @@ export default function App() {
             size={EDITOR_SIZE}
             selectedNode={selectedNode}
             showVoronoi={showVoronoi}
+            layoutMode={layoutMode}
+            vizSpace={vizSpace}
+            showAxes={showAxes}
+            backdrop={layoutMode === 'surface' ? backdrop : null}
             onSelectNode={setSelectedNode}
             onBranchAt={handleBranchAt}
             onDeleteNode={handleDelete}
@@ -667,6 +810,10 @@ export default function App() {
             colors={colors}
             size={EDITOR_SIZE}
             selectedNode={selectedNode}
+            layoutMode={layoutMode}
+            vizSpace={vizSpace}
+            showAxes={showAxes}
+            backdrop={layoutMode === 'surface' ? backdrop : null}
             onSelectNode={setSelectedNode}
             onBranchAt={handleBranchAt}
             onDeleteNode={handleDelete}

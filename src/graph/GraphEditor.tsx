@@ -1,5 +1,7 @@
 import { useState, useRef, useCallback, useEffect, type PointerEvent as ReactPointerEvent } from 'react'
 import type { Graph } from './graphSOM'
+import { computeFrameSegments, frameToWorld, type LayoutMode } from './layout'
+import type { VizSpace } from '../colorSpaces'
 
 interface GraphEditorProps {
   graph: Graph
@@ -7,6 +9,10 @@ interface GraphEditorProps {
   size: number
   selectedNode: number | null
   showVoronoi: boolean
+  layoutMode: LayoutMode
+  vizSpace: VizSpace
+  showAxes: boolean
+  backdrop: string | null
   onSelectNode: (id: number | null) => void
   onBranchAt: (parentId: number, x: number, y: number) => void
   onDeleteNode: (id: number) => void
@@ -63,7 +69,7 @@ type DragMode =
 export default function GraphEditor({
   graph, colors, size, selectedNode,
   onSelectNode, onBranchAt, onDeleteNode, onMoveNode, onAddEdge, onDeleteEdge, onBatchDelete,
-  onDragStart, onDragEnd, showVoronoi,
+  onDragStart, onDragEnd, showVoronoi, layoutMode, vizSpace, showAxes, backdrop,
 }: GraphEditorProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [modifierHeld, setModifierHeld] = useState(false)
@@ -338,6 +344,24 @@ export default function GraphEditor({
       onClick={onClickBackground}
       onContextMenu={onContextMenu}
     >
+      {/* Surface-mode backdrop: the palletope render nodes snap onto */}
+      {layoutMode === 'surface' && backdrop && (
+        <image href={backdrop} x={0} y={0} width={size} height={size} preserveAspectRatio="none" style={{ pointerEvents: 'none' }} />
+      )}
+
+      {/* Colour-space axis frame (flattened to 2D) */}
+      {layoutMode === 'colorspace' && showAxes && computeFrameSegments(vizSpace).segments.map((s, i) => {
+        const a = frameToWorld(s.a), b = frameToWorld(s.b)
+        if (a.x === b.x && a.y === b.y) return null   // edge collapses to a point when z is dropped
+        return (
+          <line key={`ax${i}`}
+            x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+            stroke={s.color} strokeWidth={s.width} opacity={0.7}
+            style={{ pointerEvents: 'none' }}
+          />
+        )
+      })}
+
       {/* Edges (hidden in voronoi mode unless modifier held) */}
       {(!showVoronoi || modifierHeld) && graph.edges.map(([a, b], i) => {
         const na = graph.nodes.find(n => n.id === a)
@@ -380,6 +404,7 @@ export default function GraphEditor({
         const selected = node.id === selectedNode
         const isHover = edgeDrag?.hoverId === node.id
         const isCut = cutState?.hitNodes.has(node.id)
+        const hideNode = showVoronoi && !modifierHeld
         return (
           <g key={node.id}>
             <circle
@@ -388,13 +413,15 @@ export default function GraphEditor({
               style={{ cursor: dragState?.kind === 'move' ? 'grabbing' : 'crosshair' }}
               onPointerDown={e => onPointerDownNode(e, node.id)}
             />
-            <circle
-              cx={node.x} cy={node.y} r={NODE_R}
-              fill={isCut ? '#a44' : fill}
-              stroke={isCut ? '#f66' : isHover ? '#8d8' : selected ? '#8d8' : '#555'}
-              strokeWidth={isCut ? 3 : isHover ? 3 : selected ? 2.5 : 1}
-              style={{ pointerEvents: 'none' }}
-            />
+            {!hideNode && (
+              <circle
+                cx={node.x} cy={node.y} r={NODE_R}
+                fill={isCut ? '#a44' : fill}
+                stroke={isCut ? '#f66' : isHover ? '#8d8' : selected ? '#8d8' : '#555'}
+                strokeWidth={isCut ? 3 : isHover ? 3 : selected ? 2.5 : 1}
+                style={{ pointerEvents: 'none' }}
+              />
+            )}
           </g>
         )
       })}

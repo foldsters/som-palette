@@ -3,12 +3,18 @@ import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import type { Graph } from './graphSOM'
+import { computeFrameSegments, frameToWorld, type LayoutMode, type Vec3 } from './layout'
+import type { VizSpace } from '../colorSpaces'
 
 interface GraphEditor3DProps {
   graph: Graph
   colors: Float32Array | null
   size: number
   selectedNode: number | null
+  layoutMode: LayoutMode
+  vizSpace: VizSpace
+  showAxes: boolean
+  backdrop: string | null
   onSelectNode: (id: number | null) => void
   onBranchAt: (parentId: number, x: number, y: number, z: number) => void
   onDeleteNode: (id: number) => void
@@ -57,10 +63,68 @@ function pointToSegmentDistSq(px: number, py: number, x1: number, y1: number, x2
   return (px - projX) ** 2 + (py - projY) ** 2
 }
 
+// ─── Colour-space axis frame (mirrors the root viewer's ColorCube frame) ─────
+function ColorFrame3D({ vizSpace, center }: { vizSpace: VizSpace; center: THREE.Vector3 }) {
+  const segments = useMemo(() => computeFrameSegments(vizSpace).segments, [vizSpace])
+  const toScene = (n: Vec3): [number, number, number] => {
+    const w = frameToWorld(n)
+    return [w.x - center.x, -(w.y - center.y), w.z]
+  }
+  return (
+    <>
+      {segments.map((s, i) => (
+        <Line key={`f${i}`} points={[toScene(s.a), toScene(s.b)]} color={s.color} lineWidth={s.width} transparent opacity={0.7} />
+      ))}
+    </>
+  )
+}
+
+// ─── Surface backdrop: the palletope render as a textured plane at z=0 ────────
+function SurfacePlane({ url, center }: { url: string; center: THREE.Vector3 }) {
+  const [tex, setTex] = useState<THREE.Texture | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    new THREE.TextureLoader().load(url, t => {
+      if (cancelled) { t.dispose(); return }
+      t.colorSpace = THREE.SRGBColorSpace
+      t.magFilter = THREE.LinearFilter
+      t.minFilter = THREE.LinearFilter
+      setTex(t)
+    })
+    return () => { cancelled = true }
+  }, [url])
+  useEffect(() => () => { tex?.dispose() }, [tex])
+  if (!tex) return null
+  // Backdrop fills world 0..600 in x/y; place its centre (world 300,300) in scene.
+  const S = 600, c = S / 2
+  return (
+    <mesh position={[c - center.x, -(c - center.y), -2]}>
+      <planeGeometry args={[S, S]} />
+      <meshBasicMaterial map={tex} toneMapped={false} />
+    </mesh>
+  )
+}
+
+// ─── Re-frame the camera on layout change ────────────────────────────────────
+// colorspace/surface content spans the full ±300 colour cube / render plane,
+// which the default 400-unit dolly is too close to fit. Pull back for those
+// modes (and reset the orbit target) so the view isn't clipped/black on entry.
+function CameraFramer({ layoutMode, controlsRef }: { layoutMode: LayoutMode; controlsRef: React.MutableRefObject<any> }) {
+  const { camera } = useThree()
+  useEffect(() => {
+    const dist = layoutMode === 'graph' ? 400 : 820
+    camera.position.set(0, 0, dist)
+    camera.updateProjectionMatrix()
+    const c = controlsRef.current
+    if (c) { c.target.set(0, 0, 0); c.update() }
+  }, [layoutMode, camera, controlsRef])
+  return null
+}
+
 function GraphScene({
   graph, colors, selectedNode, cutHitNodes, cutHitEdges,
   onSelectNode, onBranchAt, onDeleteNode, onMoveNode, onAddEdge, onDeleteEdge,
-  onDragStart, onDragEnd, cameraRef,
+  onDragStart, onDragEnd, cameraRef, layoutMode, vizSpace, showAxes, backdrop,
 }: Omit<GraphEditor3DProps, 'size' | 'onBatchDelete'> & { cutHitNodes: Set<number>; cutHitEdges: Set<string>; cameraRef: React.MutableRefObject<THREE.Camera | null> }) {
   const { camera, raycaster, pointer, gl } = useThree()
   cameraRef.current = camera
@@ -273,6 +337,10 @@ function GraphScene({
       <directionalLight position={[200, 200, 200]} intensity={0.8} />
       <directionalLight position={[-100, -100, -100]} intensity={0.3} />
       <OrbitControls ref={controlsRef} enablePan makeDefault />
+      <CameraFramer layoutMode={layoutMode} controlsRef={controlsRef} />
+
+      {layoutMode === 'colorspace' && showAxes && <ColorFrame3D vizSpace={vizSpace} center={center} />}
+      {layoutMode === 'surface' && backdrop && <SurfacePlane url={backdrop} center={center} />}
 
       {/* Edges */}
       {graph.edges.map(([a, b], i) => {
