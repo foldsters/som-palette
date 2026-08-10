@@ -50,6 +50,7 @@ export default function App() {
   const [showVoronoi, setShowVoronoi]   = useState(false)
   const [autoGrow, setAutoGrow]          = useState(false)
   const [lattice, setLattice]           = useState(false)
+  const [representative, setRepresentative] = useState(false)
   const [maxNodes, setMaxNodes]         = useState(24)
   const [maxNodesInput, setMaxNodesInput] = useState('24')
   const [branchFactor, setBranchFactor] = useState(2.5)
@@ -130,7 +131,7 @@ export default function App() {
 
       function tickGSOM() {
         if (gen !== genRef.current) return
-        gsom = runGSOMBatch(gsom, imageData!, batchSize, maxNodes, branchFactor, lattice, blendDecay, radiusDecay)
+        gsom = runGSOMBatch(gsom, imageData!, batchSize, maxNodes, branchFactor, lattice, blendDecay, radiusDecay, representative)
 
         // Sync graph and colors to React state
         setGraph(gsom.graph)
@@ -173,7 +174,7 @@ export default function App() {
 
     return () => { cancelAnimationFrame(rafId); ++genRef.current }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageData, autoGrow ? '' : getStructKey(graph), iterations, redrawKey, blendDecay, radiusDecay, autoGrow, maxNodes, branchFactor, lattice])
+  }, [imageData, autoGrow ? '' : getStructKey(graph), iterations, redrawKey, blendDecay, radiusDecay, autoGrow, maxNodes, branchFactor, lattice, representative])
 
   // Surface mode is a flat 2D render — 3D adds nothing, so force the 2D view.
   useEffect(() => { if (layoutMode === 'surface') setView('2d') }, [layoutMode])
@@ -724,6 +725,13 @@ export default function App() {
               style={{ ...btnStyle, color: lattice ? '#8d8' : '#666' }}
             >
               lattice
+            </button>
+            <button
+              onClick={() => setRepresentative(v => !v)}
+              title="k-means update (no topology spread): a divisive tree of dominant colours instead of spanning ones"
+              style={{ ...btnStyle, color: representative ? '#8d8' : '#666' }}
+            >
+              representative
             </button>
             {!lattice && (
               <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>

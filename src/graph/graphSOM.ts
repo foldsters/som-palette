@@ -191,6 +191,7 @@ export function runGSOMBatch(
   lattice = false,
   blendDecay = 0.5,
   radiusDecay = 0.5,
+  representative = false,
 ): GSOMState {
   const { width, height, data } = imageData
   const totalPx = width * height
@@ -203,7 +204,7 @@ export function runGSOMBatch(
 
   // Schedule growth: linearly ramp from 1 to maxNodes across growing phase
   const nodesNeeded = Math.max(0, maxNodes - 1)
-  const targetNodesAt = (it: number) => Math.min(maxNodes, 1 + (growIter > 0 ? Math.floor(nodesNeeded * it / growIter) : nodesNeeded))
+  const targetNodesAt = (it: number) => Math.min(maxNodes, 1 + (growIter > 1 ? Math.ceil(nodesNeeded * (it + 1) / growIter) : nodesNeeded))
 
   // Branching: max degree per node. branchFactor 2 = line, 3 = binary tree, etc.
   // Fractional part = probability of allowing one extra edge at that node.
@@ -246,15 +247,27 @@ export function runGSOMBatch(
     // Accumulate error on BMU
     errors[bmuIdx] += Math.sqrt(bmuDist)
 
-    // Update neighbors
-    for (let i = 0; i < N; i++) {
-      const dist = distMatrix[bmuIdx * N + i]
-      if (dist >= cutoff) continue
-      const influence = lr * Math.exp(-dist * dist / sigma2)
-      const idx = i * 3
-      palette[idx]     += influence * (pr - palette[idx])
-      palette[idx + 1] += influence * (pg - palette[idx + 1])
-      palette[idx + 2] += influence * (pb - palette[idx + 2])
+    // Update. The SOM spreads the move to graph neighbors (topological coupling,
+    // which makes nodes span the colour manifold). 'representative' mode kills the
+    // neighbourhood and moves only the BMU — i.e. online k-means — so each node
+    // converges to the centroid of its Voronoi cell (a dominant colour). Combined
+    // with the split-highest-error growth above, that's divisive/bisecting k-means:
+    // a tree of representative colours.
+    if (representative) {
+      const idx = bmuIdx * 3
+      palette[idx]     += lr * (pr - palette[idx])
+      palette[idx + 1] += lr * (pg - palette[idx + 1])
+      palette[idx + 2] += lr * (pb - palette[idx + 2])
+    } else {
+      for (let i = 0; i < N; i++) {
+        const dist = distMatrix[bmuIdx * N + i]
+        if (dist >= cutoff) continue
+        const influence = lr * Math.exp(-dist * dist / sigma2)
+        const idx = i * 3
+        palette[idx]     += influence * (pr - palette[idx])
+        palette[idx + 1] += influence * (pg - palette[idx + 1])
+        palette[idx + 2] += influence * (pb - palette[idx + 2])
+      }
     }
 
     // Scheduled growth: add a node if we're behind target count
