@@ -12,10 +12,27 @@ import { computeTargetPosition, VIZ_SPACES, type LayoutMode, type Vec3 } from '.
 import type { VizSpace } from '../colorSpaces'
 import { GLSOM } from '../glSOM'
 import { runSOMBatch, renderPalette } from '../som'
+import { type Theme, deriveTheme, DANGER, DANGER_BG, MODAL_SCRIM } from '../theme'
 
 const DEFAULT_ITERATIONS = 500
 const EDITOR_SIZE = 600
 const IMG_SIZE = 200
+
+// ─── Shared button style (matches the extractor app) ─────────────────────────
+function btn(T: Theme, active = false, danger = false): React.CSSProperties {
+  return {
+    padding: '6px 16px',
+    borderRadius: '6px',
+    border: `1px solid ${danger ? DANGER : active ? T.accent : T.border}`,
+    background: danger ? DANGER_BG : active ? T.border : 'transparent',
+    color: T.text,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    fontSize: '12px',
+    transition: 'all 0.15s',
+    whiteSpace: 'nowrap' as const,
+  }
+}
 
 // ─── Surface (palletope render) mode ─────────────────────────────────────────
 const TOPOLOGIES = [
@@ -61,6 +78,9 @@ export default function App() {
   const [gridSize, setGridSize]         = useState(512)
   const [backdrop, setBackdrop]         = useState<string | null>(null)
   const [surfaceRendering, setSurfaceRendering] = useState(false)
+  const [lightMode, setLightMode]       = useState(false)
+  const [chromaMode, setChromaMode]     = useState(false)
+  const [showInfo, setShowInfo]         = useState(false)
 
   const imageCanvasRef = useRef<HTMLCanvasElement>(null)
   const genRef         = useRef(0)
@@ -249,6 +269,12 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     window.addEventListener('keyup', onKey)
     return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('keyup', onKey) }
+  }, [])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowInfo(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   useEffect(() => {
@@ -584,27 +610,57 @@ export default function App() {
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
+  // Derive four "corner" colours from the trained node palette so chroma mode
+  // can tint the UI, the same way the extractor uses its grid corners.
+  const paletteCorners = (() => {
+    const c = colors
+    if (!c || c.length < 3) return null
+    const N = Math.floor(c.length / 3)
+    const pick = [0, Math.floor(N / 3), Math.floor((2 * N) / 3), N - 1]
+    const out = new Float32Array(12)
+    for (let k = 0; k < 4; k++) {
+      const i = Math.min(pick[k], N - 1) * 3
+      out[k * 3] = c[i]; out[k * 3 + 1] = c[i + 1]; out[k * 3 + 2] = c[i + 2]
+    }
+    return out
+  })()
+  const T = deriveTheme(chromaMode ? paletteCorners : null, lightMode)
+
+  // Paint the page background so light mode has no dark gutter on scroll.
+  useEffect(() => {
+    document.documentElement.style.background = T.bg
+    document.body.style.background = T.bg
+  }, [T.bg])
+
+  // Compact toolbar button, themed off the shared btn() helper.
   const btnStyle: React.CSSProperties = {
-    background: '#1a1a1a',
-    border: '1px solid #333',
-    borderRadius: '4px',
-    color: '#ccc',
+    ...btn(T),
     padding: '4px 12px',
-    cursor: 'pointer',
-    fontFamily: 'inherit',
+    borderRadius: '4px',
     fontSize: '10px',
     letterSpacing: '0.05em',
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: '#111', color: '#ccc', padding: '24px', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-      <div style={{ fontSize: '10px', letterSpacing: '0.15em', color: '#444', marginBottom: '16px' }}>
+    <div style={{ minHeight: '100vh', background: T.bg, color: T.text, padding: '24px', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', alignItems: 'center', transition: 'background 0.2s, color 0.2s' }}>
+      {/* Lighting + help controls (matches the extractor) */}
+      <div style={{ position: 'fixed', top: '8px', right: '8px', zIndex: 50, display: 'flex', gap: '6px' }}>
+        <button onClick={() => setLightMode(m => !m)} style={{ ...btn(T), padding: '5px 12px', fontSize: '18px' }} title="Toggle light / dark">
+          {lightMode ? '◑' : '◐'}
+        </button>
+        <button onClick={() => setChromaMode(m => !m)} style={{ ...btn(T, chromaMode), padding: '5px 12px', fontSize: '18px' }} title="Tint the UI from the palette colours">
+          ✦
+        </button>
+        <button onClick={() => setShowInfo(true)} style={{ ...btn(T), padding: '5px 12px', fontSize: '18px' }}>?</button>
+      </div>
+
+      <div style={{ fontSize: '10px', letterSpacing: '0.15em', color: T.muted, marginBottom: '16px' }}>
         SOM PALETTE · GRAPH
       </div>
 
       {/* Controls */}
       <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '24px', justifyContent: 'center' }}>
-        <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
           ITER
           <input
             type="number" value={iterations} min={1}
@@ -612,14 +668,14 @@ export default function App() {
             style={{ width: '60px' }}
           />
         </label>
-        <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
           BLEND
           <input type="range" min={0} max={1} step={0.01} value={blendDecay}
             onChange={e => setBlendDecay(parseFloat(e.target.value))}
             style={{ width: '60px' }}
           />
         </label>
-        <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
           RADIUS
           <input type="range" min={0} max={1} step={0.01} value={radiusDecay}
             onChange={e => setRadiusDecay(parseFloat(e.target.value))}
@@ -630,16 +686,16 @@ export default function App() {
           onClick={() => { if (layoutMode !== 'surface') setView(v => v === '2d' ? '3d' : '2d') }}
           disabled={layoutMode === 'surface'}
           title={layoutMode === 'surface' ? 'surface mode is 2D only' : undefined}
-          style={{ ...btnStyle, color: layoutMode === 'surface' ? '#444' : '#8d8', cursor: layoutMode === 'surface' ? 'default' : 'pointer' }}
+          style={{ ...btnStyle, color: layoutMode === 'surface' ? T.muted : T.accent, cursor: layoutMode === 'surface' ? 'default' : 'pointer' }}
         >
           {view}
         </button>
-        <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
           LAYOUT
           <select
             value={layoutMode}
             onChange={e => setLayoutMode(e.target.value as LayoutMode)}
-            style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+            style={{ ...btnStyle, color: T.accent, padding: '3px 6px' }}
           >
             <option value="graph">graph</option>
             <option value="colorspace">colorspace</option>
@@ -648,19 +704,19 @@ export default function App() {
         </label>
         {layoutMode === 'colorspace' && (
           <>
-            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
               SPACE
               <select
                 value={vizSpace}
                 onChange={e => setVizSpace(e.target.value as VizSpace)}
-                style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+                style={{ ...btnStyle, color: T.accent, padding: '3px 6px' }}
               >
                 {VIZ_SPACES.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </label>
             <button
               onClick={() => setShowAxes(a => !a)}
-              style={{ ...btnStyle, color: showAxes ? '#8d8' : '#666' }}
+              style={{ ...btnStyle, color: showAxes ? T.accent : T.muted }}
             >
               axes
             </button>
@@ -668,22 +724,22 @@ export default function App() {
         )}
         {layoutMode === 'surface' && (
           <>
-            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
               TOPOLOGY
               <select
                 value={topology}
                 onChange={e => setTopology(e.target.value as Topology)}
-                style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+                style={{ ...btnStyle, color: T.accent, padding: '3px 6px' }}
               >
                 {TOPOLOGIES.map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             </label>
-            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
               SIZE
               <select
                 value={gridSize}
                 onChange={e => setGridSize(parseInt(e.target.value))}
-                style={{ ...btnStyle, color: '#8d8', padding: '3px 6px' }}
+                style={{ ...btnStyle, color: T.accent, padding: '3px 6px' }}
               >
                 {GRID_SIZES.map(s => <option key={s} value={s}>{s}²</option>)}
               </select>
@@ -694,20 +750,20 @@ export default function App() {
         {view === '2d' && (
           <button
             onClick={() => setShowVoronoi(v => !v)}
-            style={{ ...btnStyle, color: showVoronoi ? '#8d8' : '#666' }}
+            style={{ ...btnStyle, color: showVoronoi ? T.accent : T.muted }}
           >
             voronoi
           </button>
         )}
         <button
           onClick={() => setAutoGrow(v => !v)}
-          style={{ ...btnStyle, color: autoGrow ? '#8d8' : '#666' }}
+          style={{ ...btnStyle, color: autoGrow ? T.accent : T.muted }}
         >
           gsom
         </button>
         {autoGrow && (
           <>
-            <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
               NODES
               <input
                 type="number" value={maxNodesInput}
@@ -722,25 +778,25 @@ export default function App() {
             </label>
             <button
               onClick={() => setLattice(v => !v)}
-              style={{ ...btnStyle, color: lattice ? '#8d8' : '#666' }}
+              style={{ ...btnStyle, color: lattice ? T.accent : T.muted }}
             >
               lattice
             </button>
             <button
               onClick={() => setRepresentative(v => !v)}
               title="k-means update (no topology spread): a divisive tree of dominant colours instead of spanning ones"
-              style={{ ...btnStyle, color: representative ? '#8d8' : '#666' }}
+              style={{ ...btnStyle, color: representative ? T.accent : T.muted }}
             >
               representative
             </button>
             {!lattice && (
-              <label style={{ fontSize: '9px', color: '#666', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <label style={{ fontSize: '9px', color: T.muted, display: 'flex', alignItems: 'center', gap: '4px' }}>
                 BRANCH
                 <input type="range" min={2} max={5} step={0.1} value={branchFactor}
                   onChange={e => setBranchFactor(parseFloat(e.target.value))}
                   style={{ width: '50px' }}
                 />
-                <span style={{ fontSize: '8px', color: '#555', width: '20px' }}>{branchFactor.toFixed(1)}</span>
+                <span style={{ fontSize: '8px', color: T.muted, width: '20px' }}>{branchFactor.toFixed(1)}</span>
               </label>
             )}
           </>
@@ -748,7 +804,7 @@ export default function App() {
         <button onClick={() => setRedrawKey(k => k + 1)} style={btnStyle}>
           redraw
         </button>
-        <button onClick={loadRandom} disabled={running} style={{ ...btnStyle, color: running ? '#444' : '#ccc', fontStyle: 'italic' }}>
+        <button onClick={loadRandom} disabled={running} style={{ ...btnStyle, color: running ? T.muted : T.text, fontStyle: 'italic' }}>
           nudibranch
         </button>
         <label style={{ ...btnStyle, cursor: 'pointer' }}>
@@ -762,7 +818,7 @@ export default function App() {
             }}
           />
         </label>
-        <span style={{ fontSize: '9px', color: '#333' }}>|</span>
+        <span style={{ fontSize: '9px', color: T.muted }}>|</span>
         <button onClick={exportGPL} disabled={!colors} style={btnStyle}>gpl</button>
         <button onClick={exportPNG} disabled={!colors} style={btnStyle}>png</button>
         <button onClick={exportSVG} disabled={!colors} style={btnStyle}>svg</button>
@@ -772,14 +828,14 @@ export default function App() {
 
       {/* Source image */}
       <div style={{ marginBottom: '16px', textAlign: 'center' }}>
-        <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>SOURCE</div>
+        <div style={{ fontSize: '9px', color: T.muted, letterSpacing: '0.1em', marginBottom: '6px' }}>SOURCE</div>
         <canvas
           ref={imageCanvasRef}
           width={IMG_SIZE} height={IMG_SIZE}
           style={{ display: 'block', width: IMG_SIZE, height: IMG_SIZE, borderRadius: '4px' }}
         />
         {attribution && (
-          <div style={{ marginTop: '4px', fontSize: '8px', color: '#444', width: IMG_SIZE }}>
+          <div style={{ marginTop: '4px', fontSize: '8px', color: T.muted, width: IMG_SIZE }}>
             {attribution}
           </div>
         )}
@@ -787,9 +843,9 @@ export default function App() {
 
       {/* Graph editor */}
       <div>
-        <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: '9px', color: T.muted, letterSpacing: '0.1em', marginBottom: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>GRAPH · {graph.nodes.length} nodes · {graph.edges.length} edges</span>
-          <span style={{ color: running ? '#595' : '#444' }}>{running ? 'training...' : 'idle'}</span>
+          <span style={{ color: running ? '#595' : T.muted }}>{running ? 'training...' : 'idle'}</span>
         </div>
         {view === '2d' ? (
           <GraphEditor
@@ -833,10 +889,117 @@ export default function App() {
             onDragEnd={handleDragEnd}
           />
         )}
-        <div style={{ marginTop: '8px', fontSize: '8px', color: '#333', textAlign: 'center' }}>
+        <div style={{ marginTop: '8px', fontSize: '8px', color: T.muted, textAlign: 'center' }}>
           drag to move · shift-drag to extend edge · ctrl-drag to cut{view === '2d' ? ' · drag background to pan · scroll to zoom' : ' · orbit to rotate'}
         </div>
       </div>
+
+      {/* Info modal */}
+      {showInfo && (
+        <div
+          onClick={() => setShowInfo(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 100,
+            background: MODAL_SCRIM,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '24px',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: 'relative',
+              background: T.panel, border: `1px solid ${T.border}`,
+              borderRadius: '12px', padding: '28px 32px',
+              maxWidth: '900px', width: '100%', maxHeight: '80vh',
+              overflowY: 'auto', color: T.text, fontSize: '13px', lineHeight: '1.6',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <button onClick={() => setShowInfo(false)} style={{ ...btn(T), position: 'absolute', top: '16px', right: '16px', padding: '3px 10px', fontSize: '14px' }}>✕</button>
+            <h2 style={{ color: T.accent, fontSize: '15px', fontWeight: 'normal', letterSpacing: '0.1em', marginBottom: '20px', paddingRight: '40px' }}>
+              SOM PALETTE · GRAPH
+            </h2>
+
+            <p style={{ color: T.muted, marginBottom: '14px' }}>
+              A{' '}
+              <a href="https://en.wikipedia.org/wiki/Self-organizing_map" target="_blank" rel="noopener noreferrer" style={{ color: T.accent, textDecoration: 'none' }}>
+                <strong style={{ color: T.accent }}>Self-Organizing Map (SOM)</strong>
+              </a>
+              {' '}extracts a palette by folding a network of nodes through an image's colours until it
+              covers the colour distribution. Here the network is <strong>a graph you build yourself</strong> —
+              rather than a fixed rectangular grid — so the SOM's neighbourhood is defined by the edges you
+              draw. Each node settles on a colour, and the graph's shape controls how those colours relate.
+            </p>
+            <p style={{ color: T.muted, marginBottom: '20px' }}>
+              Build a graph by branching and connecting nodes, train it over an image, then lay the result
+              out as a force-directed network, as points in a colour space, or snapped onto a rendered
+              topological surface. Node colours can also grow automatically as the SOM trains.
+            </p>
+
+            {[
+              ['BASIC USAGE', [
+                ['Build the graph', 'Drag from a node to branch a new one; shift-drag between nodes to add an edge; ctrl-drag to cut. Every node becomes one palette colour.'],
+                ['Load an image', 'Use image to upload your own, or nudibranch to load a random creative-commons photo. The graph trains against the source colours.'],
+                ['Train', 'Training runs automatically whenever the graph or a parameter changes. redraw forces a fresh run.'],
+                ['Export', 'Save the palette as .gpl, png swatches, svg, a voronoi image, or the full graph as json.'],
+              ]],
+              ['PARAMETERS', [
+                ['Iter', 'Number of random pixel samples used to train the palette. More = higher quality, slower.'],
+                ['Blend', 'How quickly the learning rate falls off during training (0.5 = linear).'],
+                ['Radius', 'The same decay curve applied to the neighbourhood radius — how far each update spreads across the graph edges.'],
+              ]],
+              ['LAYOUT', [
+                ['graph', 'Force-directed physics: edges act as springs and nodes repel, so the graph relaxes into a readable shape. Toggle 2d / 3d.'],
+                ['colorspace', 'Nodes ease to their coordinates in a chosen colour space, turning the graph into a 3D point cloud of its own palette.'],
+                ['surface', 'Nodes snap onto a full-resolution SOM rendered over a topological surface (2D only).'],
+              ]],
+              ['COLORSPACE MODE', [
+                ['SPACE', 'Which space nodes embed into: RGB (raw cube), OKLab (perceptually uniform L/a/b), OKLCh (lightness/chroma/hue cylinder), HSV, or HSL.'],
+                ['axes', 'Show or hide the labelled axis frame around the embedding.'],
+              ]],
+              ['SURFACE MODE', [
+                ['TOPOLOGY', 'The surface the backdrop SOM is trained on — rectangular, cylindrical, toroidal, spherical, hexagonal, projective, Möbius, Klein, cone, or bicone. Each connects the grid edges differently.'],
+                ['SIZE', 'Resolution of the backdrop SOM grid (64² – 512²). Larger is sharper but slower to render.'],
+              ]],
+              ['GSOM (AUTO-GROW)', [
+                ['gsom', 'Growing SOM: start from a few nodes and add more during training, up to the NODES cap, so the graph discovers its own size.'],
+                ['lattice', 'Grow as a connected lattice rather than a branching tree.'],
+                ['representative', 'k-means-style update with no topology spread — grows a divisive tree of the image\'s dominant colours instead of spanning ones.'],
+                ['BRANCH', 'In tree mode, how eagerly nodes split (higher = more branching).'],
+              ]],
+              ['VIEW & EXPORT', [
+                ['voronoi', 'Toggle a Voronoi tessellation of the palette in the 2D editor, and export it as a full-resolution image.'],
+                ['Interaction', 'Drag to move a node; shift-drag to extend an edge; ctrl-drag to cut; drag the background to pan and scroll to zoom (2D) or orbit (3D). Hold shift/ctrl to freeze the layout while editing.'],
+              ]],
+            ].map(([heading, rows]) => (
+              <div key={heading as string} style={{ marginBottom: '20px' }}>
+                <div style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em', marginBottom: '10px' }}>
+                  {heading as string}
+                </div>
+                {(rows as [string, string][]).map(([term, desc]) => (
+                  <div key={term} style={{ display: 'flex', gap: '12px', marginBottom: '7px', flexWrap: 'wrap' }}>
+                    <span style={{ color: T.accent, minWidth: '150px', flexShrink: 0, fontSize: '12px' }}>{term}</span>
+                    <span style={{ color: T.muted, whiteSpace: 'pre-line', flex: 1, minWidth: '180px' }}>{desc}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: '8px', paddingTop: '16px', color: T.muted, fontSize: '11px' }}>
+              Made by{' '}
+              <a
+                href="https://bsky.app/profile/foldster.bsky.social"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: T.accent, textDecoration: 'none' }}
+              >
+                Foldster's Projects, LLC
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

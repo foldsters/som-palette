@@ -6,6 +6,7 @@ import { type EdgeConfig, DEFAULT_CONFIG, getTopology, getTopologyKey, gridDista
 import { TOPOLOGY_MESH_BUILDERS } from './meshes'
 import { GLSOM } from './glSOM'
 import { NUDIBRANCHS } from './nudibranchs'
+import { type Theme, deriveTheme, MODAL_SCRIM } from '../theme'
 
 const DEFAULT_ITERATIONS = 500
 const DISPLAY = 600  // palette display size in px
@@ -220,17 +221,32 @@ const TIER_COLOR: Record<string, string> = {
 }
 
 
-function segBtn(active: boolean): React.CSSProperties {
+function segBtn(T: Theme, active: boolean): React.CSSProperties {
   return {
     padding: '3px 10px',
-    border: `1px solid ${active ? '#555' : '#2a2a2a'}`,
+    border: `1px solid ${active ? T.accent : T.border}`,
     borderRadius: '3px',
-    background: active ? '#2a2a2a' : 'transparent',
-    color: active ? '#ccc' : '#444',
+    background: active ? T.border : 'transparent',
+    color: active ? T.accent : T.muted,
     fontSize: '9px',
     cursor: 'pointer',
     fontFamily: 'monospace',
     letterSpacing: '0.05em',
+  }
+}
+
+// Header icon button (light toggle / chroma / help)
+function iconBtn(T: Theme, active = false): React.CSSProperties {
+  return {
+    padding: '4px 10px',
+    borderRadius: '6px',
+    border: `1px solid ${active ? T.accent : T.border}`,
+    background: active ? T.border : 'transparent',
+    color: T.text,
+    cursor: 'pointer',
+    fontFamily: 'monospace',
+    fontSize: '16px',
+    lineHeight: 1,
   }
 }
 
@@ -414,6 +430,26 @@ export default function App() {
   const genRef                          = useRef(0)
   const glRef                           = useRef<GLSOM | null>(null)
 
+  // ─── Theme (light/dark + palette-tinted chroma) ───────────────────────────────
+  const [lightMode, setLightMode]       = useState(false)
+  const [chromaMode, setChromaMode]     = useState(false)
+  const [showInfo, setShowInfo]         = useState(false)
+  const [paletteCorners, setPaletteCorners] = useState<Float32Array | null>(null)
+  const T = deriveTheme(chromaMode ? paletteCorners : null, lightMode)
+
+  // Paint the whole page (not just the centered column) to match the theme.
+  useEffect(() => {
+    document.documentElement.style.background = T.bg
+    document.body.style.background = T.bg
+  }, [T.bg])
+
+  // Escape closes the info modal.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowInfo(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   const topology    = getTopology(cfg)
   const topologyKey = getTopologyKey(cfg)
 
@@ -506,6 +542,26 @@ export default function App() {
     rafId = requestAnimationFrame(tick)
     return () => { cancelAnimationFrame(rafId); ++genRef.current }
   }, [imageData, cfg, rows, cols, iterations, redrawKey, useGPU, blendDecay, radiusDecay])
+
+  // Sample the four palette corners (TL, TR, BL, BR) to tint the UI in chroma mode.
+  useEffect(() => {
+    if (!paletteReady) return
+    const canvas = paletteCanvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const { width: c, height: r } = canvas
+    if (c < 1 || r < 1) return
+    const corners = new Float32Array(12)
+    const pts: [number, number][] = [[0, 0], [c - 1, 0], [0, r - 1], [c - 1, r - 1]]
+    pts.forEach(([x, y], k) => {
+      const d = ctx.getImageData(x, y, 1, 1).data
+      corners[k * 3]     = d[0] / 255
+      corners[k * 3 + 1] = d[1] / 255
+      corners[k * 3 + 2] = d[2] / 255
+    })
+    setPaletteCorners(corners)
+  }, [paletteReady, rows, cols, redrawKey])
 
   // ─── Edge interaction ───────────────────────────────────────────────────────
 
@@ -650,10 +706,117 @@ export default function App() {
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div style={{ minHeight: '100vh', background: '#111', color: '#ccc', padding: '24px', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-      <div style={{ fontSize: '10px', letterSpacing: '0.15em', color: '#444', marginBottom: '16px' }}>
+    <div style={{ minHeight: '100vh', background: T.bg, color: T.text, padding: '24px', fontFamily: 'monospace', display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative', transition: 'background 0.2s' }}>
+
+      {/* Theme + help controls (top right) */}
+      <div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', gap: '8px', zIndex: 20 }}>
+        <button onClick={() => setLightMode(m => !m)} style={iconBtn(T)} title="Toggle light / dark">
+          {lightMode ? '◑' : '◐'}
+        </button>
+        <button onClick={() => setChromaMode(m => !m)} style={iconBtn(T, chromaMode)} title="Tint the UI from the palette's corner colors">
+          ✦
+        </button>
+        <button onClick={() => setShowInfo(true)} style={iconBtn(T)} title="About this app">?</button>
+      </div>
+
+      <div style={{ fontSize: '10px', letterSpacing: '0.15em', color: T.muted, marginBottom: '16px' }}>
         SOM PALETTE · TOPOLOGY SANDBOX
       </div>
+
+      {/* Info modal */}
+      {showInfo && (
+        <div
+          onClick={() => setShowInfo(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 100,
+            background: MODAL_SCRIM,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '24px',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: 'relative',
+              background: T.panel, border: `1px solid ${T.border}`,
+              borderRadius: '12px', padding: '28px 32px',
+              maxWidth: '900px', width: '100%', maxHeight: '80vh',
+              overflowY: 'auto', color: T.text, fontSize: '13px', lineHeight: '1.6',
+              backdropFilter: 'blur(8px)',
+            }}
+          >
+            <button onClick={() => setShowInfo(false)} style={{ ...iconBtn(T), position: 'absolute', top: '16px', right: '16px', padding: '3px 10px', fontSize: '14px' }}>✕</button>
+            <h2 style={{ color: T.accent, fontSize: '15px', fontWeight: 'normal', letterSpacing: '0.1em', marginBottom: '20px', paddingRight: '40px' }}>
+              TOPOLOGY SANDBOX
+            </h2>
+
+            <p style={{ color: T.muted, marginBottom: '14px' }}>
+              A{' '}
+              <a href="https://en.wikipedia.org/wiki/Self-organizing_map" target="_blank" rel="noopener noreferrer" style={{ color: T.accent, textDecoration: 'none' }}>
+                <strong style={{ color: T.accent }}>Self-Organizing Map (SOM)</strong>
+              </a>
+              {' '}is trained on an image to fold a grid of color cells through color space until it covers the
+              image's palette. This sandbox lets you wrap that palette grid onto a chosen{' '}
+              <strong style={{ color: T.accent }}>topological surface</strong> by setting how the grid's four
+              edges identify with one another — building cylinders, Möbius bands, tori, Klein bottles, and more.
+            </p>
+            <p style={{ color: T.muted, marginBottom: '20px' }}>
+              The edges you join don't only reshape the 3D mesh — they change how the SOM's neighbourhood wraps
+              during training, so the palette itself becomes seamless across whatever surface you build.
+            </p>
+
+            {[
+              ['BASIC USAGE', [
+                ['Load an image', 'image uploads a file; nudibranch loads a random nudibranch photo; a default image loads on start.'],
+                ['Grid size', 'ROWS × COLS set how many palette cells are trained. Also draggable from the palette\'s bottom-right corner.'],
+                ['Iterations', 'ITER sets how many training samples are drawn. Also draggable from the palette\'s top-left corner.'],
+                ['Redraw', 'Re-runs training. gpu / cpu toggles the WebGL2 accelerator (falls back to CPU when unsupported).'],
+                ['Export', 'Drag the palette\'s top-right corner handle downward — a short drag saves a PNG, a longer drag a GIMP .gpl palette.'],
+              ]],
+              ['EDGE IDENTIFICATION', [
+                ['Set an edge', 'Drag outward from any of the four palette edges. The direction you drag sets how that edge identifies with its opposite.'],
+                ['Outward pinch', 'Arrow points out: the edge collapses to a point and joins its opposite pinched edge (wrap).'],
+                ['Inward pinch', 'Arrow points in: the edge collapses to a point without joining the opposite edge.'],
+                ['Lateral wrap / twist', 'A sideways arrow wraps the edge onto its opposite side — same direction on both edges = a clean wrap, opposite directions = a half-twist (non-orientable).'],
+                ['Free edge', 'No arrow: the edge stays open. Opposite edges auto-update to keep the identification consistent; a ↔ or ↕ marks an axis that has become fully joined.'],
+              ]],
+              ['SURFACES', [
+                ['What you build', 'Edge combinations yield named surfaces — rectangle, cylinder, Möbius band, torus, Klein bottle, sphere, projective plane, cone, bicone, and more.'],
+                ['Rarity tier', 'The label under the mesh (common / intermediate / exotic) reflects how unusual the resulting surface is.'],
+              ]],
+              ['MESH & TRAINING', [
+                ['Shape', 'Morphs the 3D panel between the flat palette grid and the fully shaped surface.'],
+                ['U / V', 'Offset the palette texture around the surface; flip u↔v swaps the two texture axes.'],
+                ['Decay', 'Drag the palette\'s bottom-left corner: b = blend (learning-rate) decay, r = radius (neighbourhood) decay. 0.5 is linear.'],
+              ]],
+            ].map(([heading, secRows]) => (
+              <div key={heading as string} style={{ marginBottom: '20px' }}>
+                <div style={{ fontSize: '10px', color: T.muted, letterSpacing: '0.15em', marginBottom: '10px' }}>
+                  {heading as string}
+                </div>
+                {(secRows as [string, string][]).map(([term, desc]) => (
+                  <div key={term} style={{ display: 'flex', gap: '12px', marginBottom: '7px', flexWrap: 'wrap' }}>
+                    <span style={{ color: T.accent, minWidth: '170px', flexShrink: 0, fontSize: '12px' }}>{term}</span>
+                    <span style={{ color: T.muted, whiteSpace: 'pre-line', flex: 1, minWidth: '180px' }}>{desc}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+
+            <div style={{ borderTop: `1px solid ${T.border}`, marginTop: '8px', paddingTop: '16px', color: T.muted, fontSize: '11px' }}>
+              Made by{' '}
+              <a
+                href="https://bsky.app/profile/foldster.bsky.social"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: T.accent, textDecoration: 'none' }}
+              >
+                Foldster's Projects, LLC
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Controls */}
       <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '24px', justifyContent: 'center' }}>
@@ -663,7 +826,7 @@ export default function App() {
           { label: 'ITER', value: iterInput, set: setIterInput, commit: (v: number) => { if (v > 0 && v <= 100000) setIterations(v) } },
         ]).map(({ label, value, set, commit }) => (
           <div key={label} style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-            <span style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em' }}>{label}</span>
+            <span style={{ fontSize: '9px', color: T.muted, letterSpacing: '0.1em' }}>{label}</span>
             <input
               type="text"
               value={value}
@@ -671,9 +834,9 @@ export default function App() {
               onBlur={() => commit(parseInt(value))}
               onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
               style={{
-                width: '52px', padding: '3px 6px', background: '#1a1a1a',
-                border: '1px solid #2a2a2a', borderRadius: '3px',
-                color: '#ccc', fontSize: '11px', fontFamily: 'monospace',
+                width: '52px', padding: '3px 6px', background: T.paletteBg,
+                border: `1px solid ${T.border}`, borderRadius: '3px',
+                color: T.text, fontSize: '11px', fontFamily: 'monospace',
               }}
             />
           </div>
@@ -681,25 +844,25 @@ export default function App() {
         <button
           onClick={() => setRedrawKey(k => k + 1)}
           disabled={running}
-          style={{ ...segBtn(false), color: running ? '#444' : '#ccc', padding: '4px 12px' }}
+          style={{ ...segBtn(T, false), color: running ? T.muted : T.text, padding: '4px 12px' }}
         >
           {running ? 'running…' : 'redraw'}
         </button>
         <button
           onClick={() => { setUseGPU(g => !g); setRedrawKey(k => k + 1) }}
           disabled={running}
-          style={{ ...segBtn(useGPU), padding: '4px 12px' }}
+          style={{ ...segBtn(T, useGPU), padding: '4px 12px' }}
         >
           {useGPU ? 'gpu' : 'cpu'}
         </button>
         <button
           onClick={loadRandom}
           disabled={running}
-          style={{ ...segBtn(false), padding: '4px 12px', color: running ? '#444' : '#ccc', fontStyle: 'italic' }}
+          style={{ ...segBtn(T, false), padding: '4px 12px', color: running ? T.muted : T.text, fontStyle: 'italic' }}
         >
           nudibranch
         </button>
-        <label style={{ ...segBtn(false), padding: '4px 12px', cursor: 'pointer', color: '#ccc' }}>
+        <label style={{ ...segBtn(T, false), padding: '4px 12px', cursor: 'pointer', color: T.text }}>
           image
           <input
             type="file" accept="image/*" style={{ display: 'none' }}
@@ -717,7 +880,7 @@ export default function App() {
 
         {/* Palette + edge arrows */}
         <div>
-          <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>
+          <div style={{ fontSize: '9px', color: T.muted, letterSpacing: '0.1em', marginBottom: '6px' }}>
             PALETTE
           </div>
 
@@ -1016,9 +1179,9 @@ export default function App() {
 
           {/* Topology name */}
           <div style={{ marginTop: '14px', display: 'flex', alignItems: 'baseline', gap: '8px' }}>
-            <span style={{ fontSize: '15px', color: '#ccc' }}>{topology.name}</span>
+            <span style={{ fontSize: '15px', color: T.text }}>{topology.name}</span>
             <span style={{ fontSize: '9px', color: TIER_COLOR[topology.tier] }}>{topology.tier}</span>
-            {running && <span style={{ fontSize: '9px', color: '#555' }}>extracting…</span>}
+            {running && <span style={{ fontSize: '9px', color: T.muted }}>extracting…</span>}
           </div>
         </div>
 
@@ -1027,14 +1190,14 @@ export default function App() {
 
           {/* Source image */}
           <div>
-            <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>SOURCE</div>
+            <div style={{ fontSize: '9px', color: T.muted, letterSpacing: '0.1em', marginBottom: '6px' }}>SOURCE</div>
             <canvas
               ref={imageCanvasRef}
               width={256} height={256}
               style={{ display: 'block', width: 256, height: 256 }}
             />
             {attribution && (
-              <div style={{ marginTop: '4px', fontSize: '8px', color: '#444', width: 256 }}>
+              <div style={{ marginTop: '4px', fontSize: '8px', color: T.muted, width: 256 }}>
                 {attribution}
               </div>
             )}
@@ -1042,8 +1205,8 @@ export default function App() {
 
           {/* 3D mesh */}
           <div>
-            <div style={{ fontSize: '9px', color: '#444', letterSpacing: '0.1em', marginBottom: '6px' }}>MESH</div>
-            <div style={{ width: 256, height: 256, background: '#0d0d0d' }}>
+            <div style={{ fontSize: '9px', color: T.muted, letterSpacing: '0.1em', marginBottom: '6px' }}>MESH</div>
+            <div style={{ width: 256, height: 256, background: T.paletteBg }}>
               <Canvas camera={{ position: [0, 0, 1.2], fov: 45 }} flat gl={{ antialias: true }}>
                 <TopoMeshScene
                   topologyKey={topologyKey}
@@ -1060,18 +1223,18 @@ export default function App() {
             <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
               {([['shape', morphT, setMorphT], ['U', offsetX, setOffsetX], ['V', offsetY, setOffsetY]] as const).map(([label, val, set]) => (
                 <div key={label} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <span style={{ fontSize: '9px', color: '#444', width: '10px' }}>{label}</span>
+                  <span style={{ fontSize: '9px', color: T.muted, width: '10px' }}>{label}</span>
                   <input
                     type="range" min={0} max={1} step={0.001}
                     value={val}
                     onChange={e => set(parseFloat(e.target.value))}
-                    style={{ flex: 1, accentColor: '#555', width: '200px' }}
+                    style={{ flex: 1, accentColor: T.accent, width: '200px' }}
                   />
                 </div>
               ))}
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '2px' }}>
-                <span style={{ fontSize: '9px', color: '#444', width: '10px' }} />
-                <button onClick={() => setFlipUV(f => !f)} style={segBtn(flipUV)}>flip u↔v</button>
+                <span style={{ fontSize: '9px', color: T.muted, width: '10px' }} />
+                <button onClick={() => setFlipUV(f => !f)} style={segBtn(T, flipUV)}>flip u↔v</button>
               </div>
             </div>
           </div>
@@ -1080,8 +1243,8 @@ export default function App() {
 
       </div>
 
-      <div style={{ marginTop: '32px', fontSize: '9px', color: '#333' }}>
-        <a href="/som-palette/" style={{ color: '#444', textDecoration: 'none' }}>← sandbox</a>
+      <div style={{ marginTop: '32px', fontSize: '9px', color: T.muted }}>
+        <a href="/" style={{ color: T.muted, textDecoration: 'none' }}>← extractor</a>
       </div>
     </div>
   )
