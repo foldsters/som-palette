@@ -7,7 +7,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
   plugins: [react()],
-  base: '/som-palette/',
+  base: '/',
   build: {
     rollupOptions: {
       input: {
