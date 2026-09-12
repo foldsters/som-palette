@@ -4,7 +4,7 @@
 
 ![A self-organizing map trained over an image, organized across a topological grid](docs/hero-surface.png)
 
-Live demo → **https://foldsters.com/som-palette/**
+Live demo → **https://palettope.app/**
 
 ## What it is
 
